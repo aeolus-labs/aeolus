@@ -29,3 +29,8 @@ tools:
 log:
   level: info   # debug | info | warn | error
   format: json  # json | text
+
+# Live dashboard at http://localhost:8765 showing tool calls in real time.
+dashboard:
+  enabled: true
+  addr: "localhost:8765"

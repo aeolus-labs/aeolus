@@ -4,7 +4,7 @@ The control plane for AI agents' access to tools.
 
 Aeolus is an open-source proxy that sits between MCP clients (Claude Desktop, Cursor, custom agents) and the MCP servers they call. It aggregates upstream servers, filters which tools each agent sees, and logs every tool call for audit and observability.
 
-> Status: **v0.1.0 — alpha.** Multiple upstreams over stdio, namespaced tool names, allow/deny filtering, structured logs.
+> Status: **v0.2.0 — alpha.** Multi-upstream proxy with a built-in live dashboard at `http://localhost:8765` showing tool calls in real time.
 
 ## Why
 
@@ -38,15 +38,17 @@ The client sees one MCP endpoint. Aeolus handles aggregation, filtering, auth, a
 
 ## Quickstart
 
-Requires Go 1.22+ and Node (`npx`) for the example MCP server.
+Requires Go 1.22+ and Node 18+ (Vite builds the dashboard; `npx` launches example MCP servers).
 
 ```bash
 git clone https://github.com/aeolus-labs/aeolus.git
 cd aeolus
-go build -o aeolus ./cmd/aeolus
+make build                              # builds the React dashboard + Go binary
 cp examples/config.example.yaml aeolus.yaml
 ./aeolus --config aeolus.yaml
 ```
+
+With the example config, Aeolus starts a live dashboard at **http://localhost:8765**. Open it in your browser to see tool calls stream in as they happen.
 
 The proxy speaks MCP on its own stdin/stdout, so plug it into any MCP client the same way you would the underlying server. For Claude Desktop, edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
@@ -97,25 +99,59 @@ Restart your client. `tools/list` will return only the matching tools, and Aeolu
 {"msg":"tools_call","tool":"filesystem.read_file","upstream":"filesystem","latency_ms":3,"status":"ok"}
 ```
 
-## v0.1.0 checklist
+### The dashboard
 
-- [x] Scaffold Go project
-- [x] MCP protocol types and config schema
-- [x] Upstream MCP client (request/response API over stdio)
-- [x] Downstream MCP server with `initialize` + `tools/list` + `tools/call`
-- [x] **Multiple upstreams** with namespaced tool names
-- [x] Structured JSON logging
+Open `http://localhost:8765` (or whatever you set in the config). The dashboard shows:
+
+- Connected upstreams as badges in the header.
+- Total call count and error count.
+- A live table of tool calls — time, upstream, tool name, latency, status — newest at the top, streamed via Server-Sent Events.
+
+The dashboard is fully embedded in the `aeolus` binary; there's no separate service to run.
+
+### Dev mode for the dashboard
+
+If you're hacking on the React UI, run the Vite dev server for hot reload:
+
+```bash
+make dev-web                            # Vite on :5173, proxies /api/* to :8765
+./aeolus --config aeolus.yaml           # in another terminal
+```
+
+Open `http://localhost:5173` instead of `:8765` to see your edits live.
+
+## Repo layout
+
+```
+aeolus/
+├── cmd/aeolus/             Go entry point
+├── internal/
+│   ├── mcp/                JSON-RPC + MCP types
+│   ├── config/             YAML loader
+│   ├── upstream/           subprocess MCP server client
+│   ├── proxy/              aggregation, filtering, observer callback
+│   └── dashboard/          HTTP server, SSE, embedded React build
+├── dashboard/              React source (Vite + TypeScript)
+├── examples/               sample configs
+└── Makefile                build orchestration
+```
+
+## v0.2.0 checklist
+
+- [x] Multi-upstream proxy with namespaced tool names
 - [x] Tool filtering (allow / deny, globs)
+- [x] Structured JSON logging
 - [x] Tests for filter and config validation
+- [x] **Embedded React dashboard with live SSE feed**
+- [x] Single-binary distribution (React assets embedded via `go:embed`)
+- [x] Makefile for clean build workflow
 
 ## Roadmap
 
-- **v0.1.1** — HTTP + SSE transport for upstreams that aren't stdio subprocesses
-- **v0.1.2** — release binaries, Homebrew tap, `aeolus init`
-- **v0.2** — embedded local dashboard (`aeolus` serves a web UI on `:8080` showing live tool calls)
-- **v0.3** — telemetry forwarding + hosted Aeolus Cloud dashboard
+- **v0.3** — telemetry forwarding to a central endpoint; multi-user dashboard
 - **v0.4** — policy engine: argument redaction, approval gates
-- **v1.0** — SSO, audit log export, on-prem deployment
+- **v0.5** — HTTP + SSE transport for non-stdio upstreams
+- **v1.0** — SSO, audit log export, on-prem deployment, Homebrew tap
 
 ## License
 

@@ -30,10 +30,24 @@ type Proxy struct {
 	upstreams []*upstream.Upstream
 	log       *slog.Logger
 	filter    ToolFilter
+	observer  Observer
 
 	toolMu  sync.RWMutex
 	toolMap map[string]toolEntry // exposed name -> route + tool metadata
 }
+
+// ToolCallObservation is emitted after each tools/call response (success or
+// error) so observers can record metrics or stream events.
+type ToolCallObservation struct {
+	Time     time.Time
+	Tool     string
+	Upstream string
+	Latency  time.Duration
+	Status   string // "ok" | "error" | "transport_error"
+}
+
+// Observer is called once per tools/call completion. nil is allowed.
+type Observer func(ToolCallObservation)
 
 type toolEntry struct {
 	upstream     *upstream.Upstream
@@ -82,12 +96,13 @@ func matches(pattern, name string) bool {
 	return err == nil && ok
 }
 
-func New(client *mcp.Conn, upstreams []*upstream.Upstream, filter ToolFilter, log *slog.Logger) *Proxy {
+func New(client *mcp.Conn, upstreams []*upstream.Upstream, filter ToolFilter, log *slog.Logger, observer Observer) *Proxy {
 	return &Proxy{
 		client:    client,
 		upstreams: upstreams,
 		filter:    filter,
 		log:       log,
+		observer:  observer,
 		toolMap:   make(map[string]toolEntry),
 	}
 }
@@ -281,6 +296,7 @@ func (p *Proxy) routeToolsCall(ctx context.Context, msg *mcp.Message) error {
 			"status", "transport_error",
 			"error", err.Error(),
 		)
+		p.observe(params.Name, entry.upstream.Name, latency, "transport_error", started)
 		return p.replyError(msg.ID, -32603, "Upstream error: "+err.Error())
 	}
 	status := "ok"
@@ -293,11 +309,25 @@ func (p *Proxy) routeToolsCall(ctx context.Context, msg *mcp.Message) error {
 		"latency_ms", latency.Milliseconds(),
 		"status", status,
 	)
+	p.observe(params.Name, entry.upstream.Name, latency, status, started)
 	return p.client.Write(&mcp.Message{
 		JSONRPC: "2.0",
 		ID:      msg.ID,
 		Result:  resp.Result,
 		Error:   resp.Error,
+	})
+}
+
+func (p *Proxy) observe(tool, upstream string, latency time.Duration, status string, when time.Time) {
+	if p.observer == nil {
+		return
+	}
+	p.observer(ToolCallObservation{
+		Time:     when,
+		Tool:     tool,
+		Upstream: upstream,
+		Latency:  latency,
+		Status:   status,
 	})
 }
 

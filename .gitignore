@@ -13,6 +13,9 @@ coverage.txt
 .vscode/
 .idea/
 
+# Note: internal/dashboard/web/ build output is committed so `go build`
+# works without first running the dashboard build.
+
 # Local config and secrets
 *.local.yaml
 aeolus.yaml

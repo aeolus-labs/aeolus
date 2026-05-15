@@ -12,6 +12,12 @@ type Config struct {
 	Upstreams []Upstream `yaml:"upstreams"`
 	Tools     Tools      `yaml:"tools"`
 	Log       Log        `yaml:"log"`
+	Dashboard Dashboard  `yaml:"dashboard"`
+}
+
+type Dashboard struct {
+	Enabled bool   `yaml:"enabled"`
+	Addr    string `yaml:"addr"`
 }
 
 type Upstream struct {
@@ -73,6 +79,9 @@ func (c *Config) validate() error {
 	case "json", "text":
 	default:
 		return fmt.Errorf("log.format must be json or text; got %q", c.Log.Format)
+	}
+	if c.Dashboard.Enabled && c.Dashboard.Addr == "" {
+		c.Dashboard.Addr = "localhost:8765"
 	}
 	return nil
 }

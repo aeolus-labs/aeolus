@@ -8,15 +8,17 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/aeolus-labs/aeolus/internal/config"
+	"github.com/aeolus-labs/aeolus/internal/dashboard"
 	"github.com/aeolus-labs/aeolus/internal/mcp"
 	"github.com/aeolus-labs/aeolus/internal/proxy"
 	"github.com/aeolus-labs/aeolus/internal/upstream"
 )
 
-const version = "0.1.0-dev"
+const version = "0.2.0-dev"
 
 func main() {
 	var (
@@ -68,22 +70,45 @@ func run(configPath string) error {
 		upstreams = append(upstreams, proc)
 	}
 
+	var dashSrv *dashboard.Server
+	var observer proxy.Observer
+	var wg sync.WaitGroup
+	if cfg.Dashboard.Enabled {
+		dashSrv = dashboard.New(cfg.Dashboard.Addr, logger)
+		observer = func(o proxy.ToolCallObservation) {
+			dashSrv.Emit(dashboard.Event{
+				Time:      o.Time,
+				Upstream:  o.Upstream,
+				Tool:      o.Tool,
+				LatencyMs: o.Latency.Milliseconds(),
+				Status:    o.Status,
+			})
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := dashSrv.Run(ctx); err != nil {
+				logger.Error("dashboard_error", "error", err.Error())
+			}
+		}()
+	}
+
 	clientConn := mcp.NewConn(os.Stdin, os.Stdout)
 	filter := proxy.NewToolFilter(cfg.Tools)
-	p := proxy.New(clientConn, upstreams, filter, logger)
+	p := proxy.New(clientConn, upstreams, filter, logger, observer)
 
 	runErr := p.Run(ctx)
+	cancel()
 	for _, u := range upstreams {
 		_ = u.Wait()
 	}
+	wg.Wait()
 	return runErr
 }
 
-// stderrPrefixer copies bytes to os.Stderr line by line, prefixing each line.
 type stderrPrefixer struct{ prefix string }
 
 func (s stderrPrefixer) Write(p []byte) (int, error) {
-	// Best-effort: don't split on lines, just prefix each Write batch.
 	if _, err := os.Stderr.WriteString(s.prefix); err != nil {
 		return 0, err
 	}
