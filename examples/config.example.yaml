@@ -1,0 +1,21 @@
+# Aeolus example configuration.
+#
+# v0.0.1 supports exactly one upstream MCP server over stdio.
+# Multi-upstream and HTTP+SSE transports land in v0.1.
+
+upstreams:
+  - name: filesystem
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+# Tool filtering.
+# - If `allow` is non-empty, only tools whose names match are exposed.
+# - Tools matching `deny` are hidden even if allowed.
+# - Both lists support exact names and glob patterns (e.g. "read_*").
+tools:
+  allow: []
+  deny: []
+
+log:
+  level: info   # debug | info | warn | error
+  format: json  # json | text

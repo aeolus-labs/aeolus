@@ -1,0 +1,19 @@
+# Binaries
+/aeolus
+/dist/
+*.exe
+
+# Go build artifacts
+*.test
+*.out
+coverage.txt
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Local config and secrets
+*.local.yaml
+.env
+.env.local
