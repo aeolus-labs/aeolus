@@ -30,10 +30,31 @@ func (m *Message) IsResponse() bool     { return len(m.ID) > 0 && m.Method == ""
 func (m *Message) IsNotification() bool { return len(m.ID) == 0 && m.Method != "" }
 
 const (
-	MethodInitialize = "initialize"
-	MethodToolsList  = "tools/list"
-	MethodToolsCall  = "tools/call"
+	MethodInitialize  = "initialize"
+	MethodInitialized = "notifications/initialized"
+	MethodToolsList   = "tools/list"
+	MethodToolsCall   = "tools/call"
+
+	ProtocolVersion = "2024-11-05"
 )
+
+type Info struct {
+	Name    string `json:"name"`
+	Version string `json:"version,omitempty"`
+}
+
+type InitializeParams struct {
+	ProtocolVersion string          `json:"protocolVersion"`
+	Capabilities    json.RawMessage `json:"capabilities,omitempty"`
+	ClientInfo      Info            `json:"clientInfo"`
+}
+
+type InitializeResult struct {
+	ProtocolVersion string          `json:"protocolVersion"`
+	Capabilities    json.RawMessage `json:"capabilities,omitempty"`
+	ServerInfo      Info            `json:"serverInfo"`
+	Instructions    string          `json:"instructions,omitempty"`
+}
 
 // Tool is one entry of a tools/list response. Aeolus only needs Name for
 // filtering; the rest is preserved verbatim.

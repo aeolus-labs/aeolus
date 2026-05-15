@@ -4,7 +4,7 @@ The control plane for AI agents' access to tools.
 
 Aeolus is an open-source proxy that sits between MCP clients (Claude Desktop, Cursor, custom agents) and the MCP servers they call. It aggregates upstream servers, filters which tools each agent sees, and logs every tool call for audit and observability.
 
-> Status: **v0.0.1 — alpha.** Single upstream over stdio, tool filtering, structured logs. See the quickstart below.
+> Status: **v0.1.0 — alpha.** Multiple upstreams over stdio, namespaced tool names, allow/deny filtering, structured logs.
 
 ## Why
 
@@ -63,45 +63,59 @@ The proxy speaks MCP on its own stdin/stdout, so plug it into any MCP client the
 
 Restart Claude Desktop. The filesystem tools will appear, proxied through Aeolus. Tool calls are logged as JSON on the proxy's stderr.
 
-### Try the tool filter
+### Namespaced tool names
 
-The example config exposes every filesystem tool. To trim the toolset the model sees, edit `aeolus.yaml`:
+When Aeolus aggregates tools from multiple upstreams, every tool is exposed to the client with its upstream name as a prefix:
+
+```
+filesystem  →  filesystem.read_file, filesystem.write_file, ...
+github      →  github.create_issue, github.list_repos, ...
+```
+
+This avoids collisions between upstreams that share tool names, and makes filter rules read naturally — `github.delete_*` matches all destructive GitHub operations regardless of what else `github` exposes.
+
+### Try the tool filter
 
 ```yaml
 tools:
   allow:
-    - read_*       # only read_file, read_multiple_files, ...
+    - filesystem.read_*    # only filesystem read operations
+    - github.list_*        # and read-only GitHub queries
   deny:
-    - read_media_* # but not the binary readers
+    - filesystem.read_media_*
 ```
 
-Restart, ask Claude what tools it has, and only the allowed names will be visible. Aeolus logs a `tools_list` event with before / after counts whenever a client lists tools.
+Restart your client. `tools/list` will return only the matching tools, and Aeolus logs the before / after count.
 
 ### What the logs look like
 
 ```
-{"time":"...","level":"INFO","msg":"aeolus_start","version":"0.0.1-dev","upstream":"filesystem"}
-{"time":"...","level":"INFO","msg":"tools_list","before":12,"after":4,"filtered_out":8}
-{"time":"...","level":"INFO","msg":"tools_call","tool":"read_file","latency_ms":3,"status":"ok"}
+{"msg":"aeolus_start","version":"0.1.0-dev","upstreams":["filesystem","github"]}
+{"msg":"upstream_initialized","name":"filesystem","server":"filesystem","protocol":"2024-11-05"}
+{"msg":"tools_loaded","count":26}
+{"msg":"tools_list","before":26,"after":8,"filtered_out":18}
+{"msg":"tools_call","tool":"filesystem.read_file","upstream":"filesystem","latency_ms":3,"status":"ok"}
 ```
 
-## v0.0.1 checklist
+## v0.1.0 checklist
 
 - [x] Scaffold Go project
 - [x] MCP protocol types and config schema
-- [x] Upstream MCP client (one server, stdio transport)
-- [x] Downstream MCP server (stdio transport)
-- [x] Pass-through forwarding end-to-end
-- [x] Structured JSON logging of tool calls
-- [x] Tool filtering (allow / deny list)
-- [x] README quickstart with a real MCP server
+- [x] Upstream MCP client (request/response API over stdio)
+- [x] Downstream MCP server with `initialize` + `tools/list` + `tools/call`
+- [x] **Multiple upstreams** with namespaced tool names
+- [x] Structured JSON logging
+- [x] Tool filtering (allow / deny, globs)
+- [x] Tests for filter and config validation
 
 ## Roadmap
 
-- **v0.1** — HTTP + SSE transport, multiple upstreams, per-tool latency metrics
-- **v0.2** — hosted dashboard (Aeolus Cloud) for telemetry and search
-- **v0.3** — policy engine: deny rules, argument redaction, approval gates
-- **v1.0** — production-ready, SSO, audit log export
+- **v0.1.1** — HTTP + SSE transport for upstreams that aren't stdio subprocesses
+- **v0.1.2** — release binaries, Homebrew tap, `aeolus init`
+- **v0.2** — embedded local dashboard (`aeolus` serves a web UI on `:8080` showing live tool calls)
+- **v0.3** — telemetry forwarding + hosted Aeolus Cloud dashboard
+- **v0.4** — policy engine: argument redaction, approval gates
+- **v1.0** — SSO, audit log export, on-prem deployment
 
 ## License
 

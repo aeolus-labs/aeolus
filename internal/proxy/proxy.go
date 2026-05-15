@@ -1,11 +1,13 @@
-// Package proxy wires a downstream MCP client to an upstream MCP server,
-// filtering tools/list responses and logging tools/call invocations.
+// Package proxy wires a downstream MCP client to one or more upstream MCP
+// servers, aggregating their tool lists with per-upstream name prefixes,
+// applying allow/deny filters, and logging every tools/call.
 package proxy
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path"
@@ -15,24 +17,31 @@ import (
 
 	"github.com/aeolus-labs/aeolus/internal/config"
 	"github.com/aeolus-labs/aeolus/internal/mcp"
+	"github.com/aeolus-labs/aeolus/internal/upstream"
+)
+
+const (
+	proxyName    = "aeolus"
+	proxyVersion = "0.1.0-dev"
 )
 
 type Proxy struct {
-	client   *mcp.Conn
-	upstream *mcp.Conn
-	log      *slog.Logger
-	filter   ToolFilter
+	client    *mcp.Conn
+	upstreams []*upstream.Upstream
+	log       *slog.Logger
+	filter    ToolFilter
 
-	mu       sync.Mutex
-	inflight map[string]pendingCall
+	toolMu  sync.RWMutex
+	toolMap map[string]toolEntry // exposed name -> route + tool metadata
 }
 
-type pendingCall struct {
-	method   string
-	toolName string
-	started  time.Time
+type toolEntry struct {
+	upstream     *upstream.Upstream
+	originalName string
+	tool         mcp.Tool // tool.Name is the exposed (prefixed) name
 }
 
+// ToolFilter decides whether an exposed tool name is shown to the client.
 type ToolFilter struct {
 	allow []string
 	deny  []string
@@ -42,9 +51,9 @@ func NewToolFilter(cfg config.Tools) ToolFilter {
 	return ToolFilter{allow: cfg.Allow, deny: cfg.Deny}
 }
 
-// Allowed reports whether tool name is exposed to the client.
-// Patterns support glob matching via path.Match (e.g. "read_*").
-// If allow is empty, all tools are allowed by default (deny still applies).
+// Allowed reports whether name (the exposed, prefixed name) is exposed.
+// Patterns support glob matching via path.Match (e.g. "github.create_*").
+// If allow is empty, all non-denied tools pass.
 func (f ToolFilter) Allowed(name string) bool {
 	for _, pat := range f.deny {
 		if matches(pat, name) {
@@ -73,168 +82,229 @@ func matches(pattern, name string) bool {
 	return err == nil && ok
 }
 
-func New(client, upstream *mcp.Conn, filter ToolFilter, log *slog.Logger) *Proxy {
+func New(client *mcp.Conn, upstreams []*upstream.Upstream, filter ToolFilter, log *slog.Logger) *Proxy {
 	return &Proxy{
-		client:   client,
-		upstream: upstream,
-		filter:   filter,
-		log:      log,
-		inflight: make(map[string]pendingCall),
+		client:    client,
+		upstreams: upstreams,
+		filter:    filter,
+		log:       log,
+		toolMap:   make(map[string]toolEntry),
 	}
 }
 
-// Run pumps messages in both directions until one side closes or ctx is canceled.
+// Run initializes all upstreams, builds the tool route map, and serves the client.
 func (p *Proxy) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	errCh := make(chan error, 2)
-	go func() { errCh <- p.pump(p.client, p.upstream, p.onClientToUpstream) }()
-	go func() { errCh <- p.pump(p.upstream, p.client, p.onUpstreamToClient) }()
-
-	select {
-	case err := <-errCh:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
+	clientInfo := mcp.Info{Name: proxyName, Version: proxyVersion}
+	for _, u := range p.upstreams {
+		result, err := u.Initialize(ctx, clientInfo)
+		if err != nil {
+			return fmt.Errorf("initialize %s: %w", u.Name, err)
+		}
+		p.log.Info("upstream_initialized",
+			"name", u.Name,
+			"server", result.ServerInfo.Name,
+			"protocol", result.ProtocolVersion,
+		)
 	}
+
+	if err := p.refreshTools(ctx); err != nil {
+		return err
+	}
+	p.log.Info("tools_loaded", "count", p.toolCount())
+
+	return p.serveClient(ctx)
 }
 
-type interceptor func(*mcp.Message) (*mcp.Message, error)
+func (p *Proxy) toolCount() int {
+	p.toolMu.RLock()
+	defer p.toolMu.RUnlock()
+	return len(p.toolMap)
+}
 
-func (p *Proxy) pump(src, dst *mcp.Conn, intercept interceptor) error {
+func (p *Proxy) refreshTools(ctx context.Context) error {
+	next := make(map[string]toolEntry)
+	for _, u := range p.upstreams {
+		resp, err := u.Request(ctx, mcp.MethodToolsList, struct{}{})
+		if err != nil {
+			return fmt.Errorf("tools/list from %s: %w", u.Name, err)
+		}
+		if resp.Error != nil {
+			return fmt.Errorf("tools/list from %s: %s", u.Name, resp.Error.Message)
+		}
+		var result mcp.ToolsListResult
+		if err := json.Unmarshal(resp.Result, &result); err != nil {
+			return fmt.Errorf("parse tools/list from %s: %w", u.Name, err)
+		}
+		prefix := u.Name + "."
+		for _, t := range result.Tools {
+			exposed := prefix + t.Name
+			next[exposed] = toolEntry{
+				upstream:     u,
+				originalName: t.Name,
+				tool: mcp.Tool{
+					Name:        exposed,
+					Description: t.Description,
+					InputSchema: t.InputSchema,
+				},
+			}
+		}
+	}
+	p.toolMu.Lock()
+	p.toolMap = next
+	p.toolMu.Unlock()
+	return nil
+}
+
+func (p *Proxy) serveClient(ctx context.Context) error {
 	for {
-		msg, err := src.Read()
+		msg, err := p.client.Read()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
 			return err
 		}
-		msg, err = intercept(msg)
-		if err != nil {
+		if err := p.handleClient(ctx, msg); err != nil {
 			return err
 		}
-		if msg == nil {
+	}
+}
+
+func (p *Proxy) handleClient(ctx context.Context, msg *mcp.Message) error {
+	switch {
+	case msg.IsRequest():
+		return p.handleRequest(ctx, msg)
+	case msg.IsNotification():
+		return p.handleNotification(msg)
+	}
+	return nil
+}
+
+func (p *Proxy) handleRequest(ctx context.Context, msg *mcp.Message) error {
+	switch msg.Method {
+	case mcp.MethodInitialize:
+		return p.replyInitialize(msg)
+	case mcp.MethodToolsList:
+		return p.replyToolsList(msg)
+	case mcp.MethodToolsCall:
+		return p.routeToolsCall(ctx, msg)
+	default:
+		return p.replyError(msg.ID, -32601, "Method not found: "+msg.Method)
+	}
+}
+
+func (p *Proxy) handleNotification(msg *mcp.Message) error {
+	// Upstreams are initialized at startup, so client's "initialized" is a no-op.
+	// Other notifications are dropped for v0.1.0; broadcasting is a future change.
+	return nil
+}
+
+func (p *Proxy) replyInitialize(msg *mcp.Message) error {
+	result := mcp.InitializeResult{
+		ProtocolVersion: mcp.ProtocolVersion,
+		Capabilities:    json.RawMessage(`{"tools":{"listChanged":false}}`),
+		ServerInfo:      mcp.Info{Name: proxyName, Version: proxyVersion},
+	}
+	resultRaw, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	return p.client.Write(&mcp.Message{
+		JSONRPC: "2.0",
+		ID:      msg.ID,
+		Result:  resultRaw,
+	})
+}
+
+func (p *Proxy) replyToolsList(msg *mcp.Message) error {
+	p.toolMu.RLock()
+	tools := make([]mcp.Tool, 0, len(p.toolMap))
+	for _, e := range p.toolMap {
+		if !p.filter.Allowed(e.tool.Name) {
 			continue
 		}
-		if err := dst.Write(msg); err != nil {
-			return err
-		}
+		tools = append(tools, e.tool)
 	}
-}
+	total := len(p.toolMap)
+	p.toolMu.RUnlock()
 
-func (p *Proxy) onClientToUpstream(msg *mcp.Message) (*mcp.Message, error) {
-	if !msg.IsRequest() {
-		return msg, nil
-	}
-	switch msg.Method {
-	case mcp.MethodToolsList:
-		p.track(msg, "")
-	case mcp.MethodToolsCall:
-		var params mcp.ToolsCallParams
-		if len(msg.Params) > 0 {
-			_ = json.Unmarshal(msg.Params, &params)
-		}
-		p.track(msg, params.Name)
-	}
-	return msg, nil
-}
-
-func (p *Proxy) onUpstreamToClient(msg *mcp.Message) (*mcp.Message, error) {
-	if !msg.IsResponse() {
-		return msg, nil
-	}
-	pending, ok := p.take(msg)
-	if !ok {
-		return msg, nil
-	}
-	switch pending.method {
-	case mcp.MethodToolsList:
-		return p.filterToolsList(msg)
-	case mcp.MethodToolsCall:
-		p.logCall(pending, msg)
-	}
-	return msg, nil
-}
-
-func (p *Proxy) track(msg *mcp.Message, toolName string) {
-	key := idKey(msg.ID)
-	if key == "" {
-		return
-	}
-	p.mu.Lock()
-	p.inflight[key] = pendingCall{
-		method:   msg.Method,
-		toolName: toolName,
-		started:  time.Now(),
-	}
-	p.mu.Unlock()
-}
-
-func (p *Proxy) take(msg *mcp.Message) (pendingCall, bool) {
-	key := idKey(msg.ID)
-	if key == "" {
-		return pendingCall{}, false
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	pending, ok := p.inflight[key]
-	if ok {
-		delete(p.inflight, key)
-	}
-	return pending, ok
-}
-
-func idKey(id json.RawMessage) string {
-	if len(id) == 0 {
-		return ""
-	}
-	return string(id)
-}
-
-func (p *Proxy) filterToolsList(msg *mcp.Message) (*mcp.Message, error) {
-	if msg.Error != nil || len(msg.Result) == 0 {
-		return msg, nil
-	}
-	var result mcp.ToolsListResult
-	if err := json.Unmarshal(msg.Result, &result); err != nil {
-		return msg, nil
-	}
-	before := len(result.Tools)
-	kept := make([]mcp.Tool, 0, before)
-	for _, t := range result.Tools {
-		if p.filter.Allowed(t.Name) {
-			kept = append(kept, t)
-		}
-	}
-	result.Tools = kept
-	newResult, err := json.Marshal(result)
+	result := mcp.ToolsListResult{Tools: tools}
+	resultRaw, err := json.Marshal(result)
 	if err != nil {
-		return msg, nil
+		return err
 	}
-	msg.Result = newResult
 	p.log.Info("tools_list",
-		"before", before,
-		"after", len(kept),
-		"filtered_out", before-len(kept),
+		"before", total,
+		"after", len(tools),
+		"filtered_out", total-len(tools),
 	)
-	return msg, nil
+	return p.client.Write(&mcp.Message{
+		JSONRPC: "2.0",
+		ID:      msg.ID,
+		Result:  resultRaw,
+	})
 }
 
-func (p *Proxy) logCall(pending pendingCall, msg *mcp.Message) {
-	latency := time.Since(pending.started)
+func (p *Proxy) routeToolsCall(ctx context.Context, msg *mcp.Message) error {
+	var params mcp.ToolsCallParams
+	if len(msg.Params) > 0 {
+		if err := json.Unmarshal(msg.Params, &params); err != nil {
+			return p.replyError(msg.ID, -32602, "Invalid params: "+err.Error())
+		}
+	}
+	p.toolMu.RLock()
+	entry, ok := p.toolMap[params.Name]
+	p.toolMu.RUnlock()
+	if !ok {
+		return p.replyError(msg.ID, -32601, "Tool not found: "+params.Name)
+	}
+	if !p.filter.Allowed(params.Name) {
+		p.log.Warn("tools_call_denied", "tool", params.Name)
+		return p.replyError(msg.ID, -32601, "Tool not allowed: "+params.Name)
+	}
+
+	upstreamParams := mcp.ToolsCallParams{
+		Name:      entry.originalName,
+		Arguments: params.Arguments,
+	}
+	started := time.Now()
+	resp, err := entry.upstream.Request(ctx, mcp.MethodToolsCall, upstreamParams)
+	latency := time.Since(started)
+	if err != nil {
+		p.log.Error("tools_call",
+			"tool", params.Name,
+			"upstream", entry.upstream.Name,
+			"latency_ms", latency.Milliseconds(),
+			"status", "transport_error",
+			"error", err.Error(),
+		)
+		return p.replyError(msg.ID, -32603, "Upstream error: "+err.Error())
+	}
 	status := "ok"
-	if msg.Error != nil {
+	if resp.Error != nil {
 		status = "error"
 	}
-	attrs := []any{
-		"tool", pending.toolName,
+	p.log.Info("tools_call",
+		"tool", params.Name,
+		"upstream", entry.upstream.Name,
 		"latency_ms", latency.Milliseconds(),
 		"status", status,
-	}
-	if msg.Error != nil {
-		attrs = append(attrs, "error_code", msg.Error.Code, "error_message", msg.Error.Message)
-	}
-	p.log.Info("tools_call", attrs...)
+	)
+	return p.client.Write(&mcp.Message{
+		JSONRPC: "2.0",
+		ID:      msg.ID,
+		Result:  resp.Result,
+		Error:   resp.Error,
+	})
+}
+
+func (p *Proxy) replyError(id json.RawMessage, code int, message string) error {
+	return p.client.Write(&mcp.Message{
+		JSONRPC: "2.0",
+		ID:      id,
+		Error:   &mcp.RPCError{Code: code, Message: message},
+	})
 }

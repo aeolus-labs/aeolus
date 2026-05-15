@@ -1,17 +1,27 @@
 # Aeolus example configuration.
 #
-# v0.0.1 supports exactly one upstream MCP server over stdio.
-# Multi-upstream and HTTP+SSE transports land in v0.1.
+# Each upstream is an MCP server Aeolus runs as a stdio subprocess.
+# Tools from every upstream are aggregated and exposed to the client with
+# names prefixed by `<upstream_name>.`, so a `read_file` tool from the
+# `filesystem` upstream becomes `filesystem.read_file` to the client.
 
 upstreams:
   - name: filesystem
     command: npx
     args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 
-# Tool filtering.
-# - If `allow` is non-empty, only tools whose names match are exposed.
-# - Tools matching `deny` are hidden even if allowed.
-# - Both lists support exact names and glob patterns (e.g. "read_*").
+  # Uncomment to add a second upstream. Tools will appear as
+  # `github.create_issue`, `github.read_repo`, etc.
+  #
+  # - name: github
+  #   command: npx
+  #   args: ["-y", "@modelcontextprotocol/server-github"]
+  #   env: ["GITHUB_PERSONAL_ACCESS_TOKEN=..."]
+
+# Tool filtering. Rules match the exposed (prefixed) name.
+# - If `allow` is non-empty, only matching tools are visible.
+# - `deny` is applied first and always wins.
+# - Both lists support glob patterns (* ? [..]) via path.Match.
 tools:
   allow: []
   deny: []

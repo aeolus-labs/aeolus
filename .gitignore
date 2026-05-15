@@ -15,5 +15,7 @@ coverage.txt
 
 # Local config and secrets
 *.local.yaml
+aeolus.yaml
+run-aeolus.sh
 .env
 .env.local

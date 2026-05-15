@@ -16,7 +16,7 @@ import (
 	"github.com/aeolus-labs/aeolus/internal/upstream"
 )
 
-const version = "0.0.1-dev"
+const version = "0.1.0-dev"
 
 func main() {
 	var (
@@ -47,28 +47,47 @@ func run(configPath string) error {
 	}
 
 	logger := newLogger(cfg.Log)
-	logger.Info("aeolus_start", "version", version, "upstream", cfg.Upstreams[0].Name)
+	names := make([]string, len(cfg.Upstreams))
+	for i, u := range cfg.Upstreams {
+		names[i] = u.Name
+	}
+	logger.Info("aeolus_start", "version", version, "upstreams", names)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	up := cfg.Upstreams[0]
-	upstreamProc, err := upstream.Start(ctx, up.Name, up.Command, up.Args)
-	if err != nil {
-		return err
+	upstreams := make([]*upstream.Upstream, 0, len(cfg.Upstreams))
+	for _, u := range cfg.Upstreams {
+		proc, err := upstream.Start(ctx, u.Name, u.Command, u.Args, logger)
+		if err != nil {
+			return err
+		}
+		go func(name string, r io.Reader) {
+			_, _ = io.Copy(stderrPrefixer{prefix: "[" + name + "] "}, r)
+		}(u.Name, proc.Stderr())
+		upstreams = append(upstreams, proc)
 	}
-	go func() { _, _ = io.Copy(os.Stderr, upstreamProc.Stderr()) }()
 
 	clientConn := mcp.NewConn(os.Stdin, os.Stdout)
 	filter := proxy.NewToolFilter(cfg.Tools)
-	p := proxy.New(clientConn, upstreamProc.Conn(), filter, logger)
+	p := proxy.New(clientConn, upstreams, filter, logger)
 
 	runErr := p.Run(ctx)
-	waitErr := upstreamProc.Wait()
-	if runErr != nil {
-		return runErr
+	for _, u := range upstreams {
+		_ = u.Wait()
 	}
-	return waitErr
+	return runErr
+}
+
+// stderrPrefixer copies bytes to os.Stderr line by line, prefixing each line.
+type stderrPrefixer struct{ prefix string }
+
+func (s stderrPrefixer) Write(p []byte) (int, error) {
+	// Best-effort: don't split on lines, just prefix each Write batch.
+	if _, err := os.Stderr.WriteString(s.prefix); err != nil {
+		return 0, err
+	}
+	return os.Stderr.Write(p)
 }
 
 func newLogger(cfg config.Log) *slog.Logger {

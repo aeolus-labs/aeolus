@@ -50,13 +50,15 @@ func (c *Config) validate() error {
 	if len(c.Upstreams) == 0 {
 		return fmt.Errorf("at least one upstream is required")
 	}
-	if len(c.Upstreams) > 1 {
-		return fmt.Errorf("v0.0.1 supports exactly one upstream; got %d", len(c.Upstreams))
-	}
+	seen := make(map[string]bool, len(c.Upstreams))
 	for i, u := range c.Upstreams {
 		if u.Name == "" {
 			return fmt.Errorf("upstreams[%d]: name is required", i)
 		}
+		if seen[u.Name] {
+			return fmt.Errorf("upstreams[%d]: duplicate name %q", i, u.Name)
+		}
+		seen[u.Name] = true
 		if u.Command == "" {
 			return fmt.Errorf("upstreams[%d] (%s): command is required", i, u.Name)
 		}
