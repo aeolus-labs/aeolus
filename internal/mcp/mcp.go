@@ -30,10 +30,11 @@ func (m *Message) IsResponse() bool     { return len(m.ID) > 0 && m.Method == ""
 func (m *Message) IsNotification() bool { return len(m.ID) == 0 && m.Method != "" }
 
 const (
-	MethodInitialize  = "initialize"
-	MethodInitialized = "notifications/initialized"
-	MethodToolsList   = "tools/list"
-	MethodToolsCall   = "tools/call"
+	MethodInitialize       = "initialize"
+	MethodInitialized      = "notifications/initialized"
+	MethodToolsList        = "tools/list"
+	MethodToolsCall        = "tools/call"
+	MethodToolsListChanged = "notifications/tools/list_changed"
 
 	ProtocolVersion = "2024-11-05"
 )

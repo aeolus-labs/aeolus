@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/aeolus-labs/aeolus/internal/config"
 	"github.com/aeolus-labs/aeolus/internal/dashboard"
@@ -17,6 +19,8 @@ import (
 	"github.com/aeolus-labs/aeolus/internal/proxy"
 	"github.com/aeolus-labs/aeolus/internal/upstream"
 )
+
+const shutdownTimeout = 3 * time.Second
 
 const version = "0.2.0-dev"
 
@@ -64,9 +68,7 @@ func run(configPath string) error {
 		if err != nil {
 			return err
 		}
-		go func(name string, r io.Reader) {
-			_, _ = io.Copy(stderrPrefixer{prefix: "[" + name + "] "}, r)
-		}(u.Name, proc.Stderr())
+		go forwardStderr(u.Name, proc.Stderr())
 		upstreams = append(upstreams, proc)
 	}
 
@@ -100,19 +102,24 @@ func run(configPath string) error {
 	runErr := p.Run(ctx)
 	cancel()
 	for _, u := range upstreams {
-		_ = u.Wait()
+		u.Shutdown(shutdownTimeout)
 	}
 	wg.Wait()
 	return runErr
 }
 
-type stderrPrefixer struct{ prefix string }
-
-func (s stderrPrefixer) Write(p []byte) (int, error) {
-	if _, err := os.Stderr.WriteString(s.prefix); err != nil {
-		return 0, err
+// forwardStderr reads `r` line by line and prints each line prefixed with
+// "[<name>] " to os.Stderr. This keeps multi-line upstream errors readable.
+func forwardStderr(name string, r io.Reader) {
+	if r == nil {
+		return
 	}
-	return os.Stderr.Write(p)
+	prefix := "[" + name + "] "
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		fmt.Fprintln(os.Stderr, prefix+scanner.Text())
+	}
 }
 
 func newLogger(cfg config.Log) *slog.Logger {

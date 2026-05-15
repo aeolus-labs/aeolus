@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/aeolus-labs/aeolus/internal/mcp"
 )
@@ -21,10 +22,11 @@ import (
 type Upstream struct {
 	Name string
 
-	cmd    *exec.Cmd
-	conn   *mcp.Conn
-	stderr io.ReadCloser
-	log    *slog.Logger
+	cmd         *exec.Cmd     // nil for non-subprocess upstreams (tests)
+	stdinCloser io.Closer     // nil for non-subprocess upstreams
+	conn        *mcp.Conn
+	stderr      io.ReadCloser // nil for non-subprocess upstreams
+	log         *slog.Logger
 
 	nextID atomic.Int64
 
@@ -35,6 +37,22 @@ type Upstream struct {
 	closeErr error
 
 	Done chan struct{}
+}
+
+// FromConn builds an Upstream from an existing MCP connection. The caller
+// owns the underlying transport; Upstream will not close it. Intended for
+// tests and future non-subprocess transports.
+func FromConn(name string, conn *mcp.Conn, log *slog.Logger) *Upstream {
+	u := &Upstream{
+		Name:    name,
+		conn:    conn,
+		log:     log,
+		pending: make(map[int64]chan *mcp.Message),
+		notif:   make(chan *mcp.Message, 16),
+		Done:    make(chan struct{}),
+	}
+	go u.readLoop()
+	return u
 }
 
 // Start launches the MCP server subprocess and begins reading its stdout.
@@ -57,22 +75,47 @@ func Start(ctx context.Context, name, command string, args []string, log *slog.L
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("upstream %s: start: %w", name, err)
 	}
-	u := &Upstream{
-		Name:    name,
-		cmd:     cmd,
-		conn:    mcp.NewConn(stdout, stdin),
-		stderr:  stderr,
-		log:     log,
-		pending: make(map[int64]chan *mcp.Message),
-		notif:   make(chan *mcp.Message, 16),
-		Done:    make(chan struct{}),
-	}
-	go u.readLoop()
+	u := FromConn(name, mcp.NewConn(stdout, stdin), log)
+	u.cmd = cmd
+	u.stdinCloser = stdin
+	u.stderr = stderr
 	return u, nil
 }
 
-func (u *Upstream) Stderr() io.Reader { return u.stderr }
-func (u *Upstream) Wait() error       { return u.cmd.Wait() }
+func (u *Upstream) Stderr() io.Reader {
+	if u.stderr == nil {
+		return nil
+	}
+	return u.stderr
+}
+
+func (u *Upstream) Wait() error {
+	if u.cmd == nil {
+		return nil
+	}
+	return u.cmd.Wait()
+}
+
+// Shutdown closes the upstream's stdin so the subprocess can exit cleanly,
+// then waits up to timeout for it to do so. After timeout the OS will kill
+// the process via exec.CommandContext.
+func (u *Upstream) Shutdown(timeout time.Duration) {
+	if u.stdinCloser != nil {
+		_ = u.stdinCloser.Close()
+	}
+	if u.cmd == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = u.cmd.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+	}
+}
 
 // Notifications returns a channel of upstream-originated notifications.
 // Slow consumers will see messages dropped (with a warning log).

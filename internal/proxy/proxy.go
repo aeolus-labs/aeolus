@@ -130,7 +130,36 @@ func (p *Proxy) Run(ctx context.Context) error {
 	}
 	p.log.Info("tools_loaded", "count", p.toolCount())
 
+	for _, u := range p.upstreams {
+		u := u
+		go p.watchUpstreamNotifications(ctx, u)
+	}
+
 	return p.serveClient(ctx)
+}
+
+func (p *Proxy) watchUpstreamNotifications(ctx context.Context, u *upstream.Upstream) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg, ok := <-u.Notifications():
+			if !ok {
+				return
+			}
+			if msg.Method == mcp.MethodToolsListChanged {
+				p.log.Info("upstream_tools_changed", "upstream", u.Name)
+				if err := p.refreshUpstream(ctx, u); err != nil {
+					p.log.Error("refresh_failed", "upstream", u.Name, "error", err.Error())
+					continue
+				}
+				_ = p.client.Write(&mcp.Message{
+					JSONRPC: "2.0",
+					Method:  mcp.MethodToolsListChanged,
+				})
+			}
+		}
+	}
 }
 
 func (p *Proxy) toolCount() int {
@@ -142,34 +171,61 @@ func (p *Proxy) toolCount() int {
 func (p *Proxy) refreshTools(ctx context.Context) error {
 	next := make(map[string]toolEntry)
 	for _, u := range p.upstreams {
-		resp, err := u.Request(ctx, mcp.MethodToolsList, struct{}{})
-		if err != nil {
-			return fmt.Errorf("tools/list from %s: %w", u.Name, err)
-		}
-		if resp.Error != nil {
-			return fmt.Errorf("tools/list from %s: %s", u.Name, resp.Error.Message)
-		}
-		var result mcp.ToolsListResult
-		if err := json.Unmarshal(resp.Result, &result); err != nil {
-			return fmt.Errorf("parse tools/list from %s: %w", u.Name, err)
-		}
-		prefix := u.Name + "."
-		for _, t := range result.Tools {
-			exposed := prefix + t.Name
-			next[exposed] = toolEntry{
-				upstream:     u,
-				originalName: t.Name,
-				tool: mcp.Tool{
-					Name:        exposed,
-					Description: t.Description,
-					InputSchema: t.InputSchema,
-				},
-			}
+		if err := fetchTools(ctx, u, next); err != nil {
+			return err
 		}
 	}
 	p.toolMu.Lock()
 	p.toolMap = next
 	p.toolMu.Unlock()
+	return nil
+}
+
+// refreshUpstream replaces just one upstream's entries in the route map.
+// Called when the upstream sends tools/list_changed.
+func (p *Proxy) refreshUpstream(ctx context.Context, u *upstream.Upstream) error {
+	fresh := make(map[string]toolEntry)
+	if err := fetchTools(ctx, u, fresh); err != nil {
+		return err
+	}
+	p.toolMu.Lock()
+	for name, entry := range p.toolMap {
+		if entry.upstream == u {
+			delete(p.toolMap, name)
+		}
+	}
+	for name, entry := range fresh {
+		p.toolMap[name] = entry
+	}
+	p.toolMu.Unlock()
+	return nil
+}
+
+func fetchTools(ctx context.Context, u *upstream.Upstream, into map[string]toolEntry) error {
+	resp, err := u.Request(ctx, mcp.MethodToolsList, struct{}{})
+	if err != nil {
+		return fmt.Errorf("tools/list from %s: %w", u.Name, err)
+	}
+	if resp.Error != nil {
+		return fmt.Errorf("tools/list from %s: %s", u.Name, resp.Error.Message)
+	}
+	var result mcp.ToolsListResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		return fmt.Errorf("parse tools/list from %s: %w", u.Name, err)
+	}
+	prefix := u.Name + "."
+	for _, t := range result.Tools {
+		exposed := prefix + t.Name
+		into[exposed] = toolEntry{
+			upstream:     u,
+			originalName: t.Name,
+			tool: mcp.Tool{
+				Name:        exposed,
+				Description: t.Description,
+				InputSchema: t.InputSchema,
+			},
+		}
+	}
 	return nil
 }
 
@@ -220,7 +276,7 @@ func (p *Proxy) handleNotification(msg *mcp.Message) error {
 func (p *Proxy) replyInitialize(msg *mcp.Message) error {
 	result := mcp.InitializeResult{
 		ProtocolVersion: mcp.ProtocolVersion,
-		Capabilities:    json.RawMessage(`{"tools":{"listChanged":false}}`),
+		Capabilities:    json.RawMessage(`{"tools":{"listChanged":true}}`),
 		ServerInfo:      mcp.Info{Name: proxyName, Version: proxyVersion},
 	}
 	resultRaw, err := json.Marshal(result)
