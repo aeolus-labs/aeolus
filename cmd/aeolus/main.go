@@ -16,7 +16,6 @@ import (
 
 	"github.com/aeolus-labs/aeolus/internal/config"
 	"github.com/aeolus-labs/aeolus/internal/dashboard"
-	"github.com/aeolus-labs/aeolus/internal/mcp"
 	"github.com/aeolus-labs/aeolus/internal/proxy"
 	"github.com/aeolus-labs/aeolus/internal/upstream"
 	"github.com/aeolus-labs/aeolus/internal/watcher"
@@ -62,6 +61,9 @@ func main() {
 		case "init":
 			handleInit(os.Args[2:])
 			return
+		case "mcp":
+			handleMCPBridge(os.Args[2:])
+			return
 		case "help", "--help", "-h":
 			printUsage()
 			return
@@ -101,13 +103,19 @@ func printUsage() {
 	fmt.Print(`Aeolus — local gateway for MCP servers.
 
 Usage:
-  aeolus --config <path>    run the proxy + dashboard
+  aeolus --config <path>    run as a daemon (dashboard + HTTP MCP endpoint)
+  aeolus mcp [flags]        stdio bridge to a running daemon (for MCP clients
+                            that don't support HTTP transport)
   aeolus init [flags]       write a starter aeolus.yaml
   aeolus --version          print version
   aeolus --help             this help
 
-Run-mode flags:
+Daemon flags:
   --config <path>           path to aeolus.yaml (required)
+
+mcp bridge flags:
+  --daemon <url>            URL of running daemon's MCP endpoint
+                            (default: http://localhost:8765/mcp)
 
 Init flags:
   --path <path>             where to write the config (default: aeolus.yaml)
@@ -157,6 +165,10 @@ func findSelfPath() string {
 	return abs
 }
 
+// run starts the long-lived daemon: dashboard + HTTP MCP endpoint +
+// upstream pool. It blocks until ctx is canceled (Ctrl+C / SIGTERM).
+// MCP clients connect either over HTTP at /mcp directly, or via the
+// `aeolus mcp` stdio bridge for clients that only support stdio.
 func run(configPath string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -173,13 +185,10 @@ func run(configPath string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// Closing stdin on signal unblocks the proxy's blocking Read so Run can
-	// return promptly. The hard fallback below guarantees the process exits
-	// within 10 seconds even if a goroutine deadlocks during shutdown.
+	// Hard fallback: guarantee exit even if a goroutine deadlocks.
 	go func() {
 		<-ctx.Done()
 		fmt.Fprintln(os.Stderr, "aeolus: shutting down...")
-		_ = os.Stdin.Close()
 		time.Sleep(5 * time.Second)
 		fmt.Fprintln(os.Stderr, "aeolus: shutdown timeout, forcing exit")
 		os.Exit(1)
@@ -213,18 +222,24 @@ func run(configPath string) error {
 		}()
 	}
 
-	clientConn := mcp.NewConn(os.Stdin, os.Stdout)
+	// Build and start the engine — the long-lived shared state.
 	filter := proxy.NewToolFilter(cfg.Tools)
-	p := proxy.New(clientConn, upstreams, filter, logger, observer)
+	engine := proxy.NewEngine(upstreams, filter, logger, observer)
+	if err := engine.Start(ctx); err != nil {
+		return err
+	}
 
-	// Single source of truth for "apply a new config to the running proxy."
-	// Both the dashboard PUT handler and the file watcher route through this.
-	reloadProxy := func(reloadCtx context.Context, newCfg *config.Config) error {
+	// Wire the engine into the dashboard so /mcp can route requests.
+	if dashSrv != nil {
+		dashSrv.SetEngine(engine)
+	}
+
+	reloadFn := func(reloadCtx context.Context, newCfg *config.Config) error {
 		newUpstreams, err := startUpstreams(reloadCtx, newCfg.Upstreams, logger)
 		if err != nil {
 			return err
 		}
-		if err := p.Reload(reloadCtx, newUpstreams, proxy.NewToolFilter(newCfg.Tools)); err != nil {
+		if err := engine.Reload(reloadCtx, newUpstreams, proxy.NewToolFilter(newCfg.Tools)); err != nil {
 			for _, u := range newUpstreams {
 				u.Shutdown(2 * time.Second)
 			}
@@ -237,13 +252,12 @@ func run(configPath string) error {
 	}
 
 	if dashSrv != nil {
-		dashSrv.SetReloader(configPath, reloadProxy)
+		dashSrv.SetReloader(configPath, reloadFn)
 	}
 
-	// File watcher: hand edits to aeolus.yaml (outside the dashboard) get
-	// picked up automatically. The dashboard's own writes flow through
-	// reloadProxy first; the watcher then fires and re-reloads, which is
-	// wasteful but harmless — the second reload is a no-op-shaped pass.
+	// File watcher: hand edits to aeolus.yaml are picked up automatically.
+	// The dashboard PUT flow first writes the file then triggers reload —
+	// the subsequent watcher event re-reloads, which is harmless.
 	go func() {
 		err := watcher.Watch(ctx, configPath, 250*time.Millisecond, func() {
 			newCfg, err := config.Load(configPath)
@@ -251,7 +265,7 @@ func run(configPath string) error {
 				logger.Warn("watcher_config_load_failed", "error", err.Error())
 				return
 			}
-			if err := reloadProxy(ctx, newCfg); err != nil {
+			if err := reloadFn(ctx, newCfg); err != nil {
 				logger.Error("watcher_reload_failed", "error", err.Error())
 				return
 			}
@@ -262,23 +276,17 @@ func run(configPath string) error {
 		}
 	}()
 
-	runErr := p.Run(ctx)
-	cancel()
+	logger.Info("daemon_ready",
+		"dashboard", "http://"+cfg.Dashboard.Addr,
+		"mcp", "http://"+cfg.Dashboard.Addr+"/mcp",
+	)
 
-	// Shut everything down concurrently so the worst case is bounded by the
-	// slowest single component, not the sum of all components.
-	var shutdownWg sync.WaitGroup
-	for _, u := range upstreams {
-		u := u
-		shutdownWg.Add(1)
-		go func() {
-			defer shutdownWg.Done()
-			u.Shutdown(shutdownTimeout)
-		}()
-	}
-	shutdownWg.Wait()
+	// Block until signal.
+	<-ctx.Done()
+
+	engine.Stop(shutdownTimeout)
 	wg.Wait()
-	return runErr
+	return nil
 }
 
 // startUpstreams launches each configured upstream via the transport-agnostic

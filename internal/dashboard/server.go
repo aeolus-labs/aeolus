@@ -47,6 +47,11 @@ type Server struct {
 	configPath  string
 	reloadFn    ReloadFunc // nil until SetReloader is called
 
+	engine McpEngine // nil until SetEngine is called
+
+	mcpMu       sync.Mutex
+	mcpSessions map[string]*mcpSession
+
 	catalogMu          sync.RWMutex
 	catalog            []CatalogEntry
 	catalogSubscribers map[chan CatalogBatch]struct{}
@@ -55,6 +60,28 @@ type Server struct {
 	maxRecent int
 	subBuffer int
 }
+
+// McpEngine is the subset of *proxy.Engine the dashboard needs to handle
+// inbound MCP HTTP traffic. Declared as an interface here so the
+// dashboard package doesn't need to import proxy.
+type McpEngine interface {
+	HandleInitialize(clientInfo mcp.Info) *mcp.InitializeResult
+	ListTools() []mcp.Tool
+	CallTool(ctx context.Context, name string, arguments json.RawMessage) *mcp.Message
+	SubscribeToolsChanged() (<-chan struct{}, func())
+}
+
+// mcpSession holds per-MCP-client state. Currently minimal; sessions
+// expire after sessionIdleTimeout of no traffic.
+type mcpSession struct {
+	id          string
+	initialized bool
+	lastSeen    time.Time
+}
+
+const (
+	sessionIdleTimeout = 10 * time.Minute
+)
 
 // ReloadFunc is invoked after a config change is persisted. It receives the
 // new validated config and is responsible for re-initializing the proxy.
@@ -76,10 +103,19 @@ func New(addr string, log *slog.Logger, cfg *config.Config) *Server {
 		recent:             make([]Event, 0, 256),
 		catalog:            nil, // populated by background registry fetch
 		catalogSubscribers: make(map[chan CatalogBatch]struct{}),
+		mcpSessions:        make(map[string]*mcpSession),
 		maxRecent:          256,
 		subBuffer:          32,
 	}
 	return s
+}
+
+// SetEngine wires the dashboard to a proxy.Engine so that POST /mcp can
+// route inbound MCP requests. Required for daemon mode; optional otherwise.
+func (s *Server) SetEngine(eng McpEngine) {
+	s.cfgMu.Lock()
+	s.engine = eng
+	s.cfgMu.Unlock()
 }
 
 // SetConfig replaces the current config snapshot served by /api/config.
@@ -132,6 +168,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/catalog/stream", s.handleCatalogStream)
 	mux.HandleFunc("/api/probe", s.handleProbe)
 	mux.HandleFunc("/api/secrets/", s.handleSecret)
+	mux.HandleFunc("/mcp", s.handleMCP)
 	if assets != nil {
 		mux.Handle("/", http.FileServer(http.FS(assets)))
 	}
