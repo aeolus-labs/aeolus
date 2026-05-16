@@ -97,8 +97,19 @@ export default function Settings() {
     }
   }
 
-  if (error) return <div className="settings-error">Failed to load settings: {error}</div>
-  if (!config) return <div className="settings-loading">Loading…</div>
+  if (!config) {
+    if (error) {
+      return (
+        <div className="settings-error">
+          <div className="settings-error-row">
+            <span>Failed to load settings: {error}</span>
+            <button className="btn-secondary" onClick={() => location.reload()}>Retry</button>
+          </div>
+        </div>
+      )
+    }
+    return <div className="settings-loading">Loading…</div>
+  }
 
   const tools = config.tools ?? {}
   const allowList = tools.allow ?? []
@@ -106,6 +117,18 @@ export default function Settings() {
 
   return (
     <div className="settings">
+      {error && (
+        <div className="page-error">
+          <span className="page-error-text">{error}</span>
+          <button
+            className="page-error-dismiss"
+            onClick={() => setError(null)}
+            aria-label="Dismiss error"
+          >
+            ×
+          </button>
+        </div>
+      )}
       <nav className="subtabs">
         <button
           className={`subtab ${settingsTab === 'upstreams' ? 'subtab-active' : ''}`}
@@ -170,13 +193,18 @@ export default function Settings() {
       )}
 
       {settingsTab === 'catalog' && (
-        <section className="settings-section">
+        <section className="settings-section catalog-section">
           <div className="settings-section-header">
-            <h2>Catalog</h2>
-            <span className="settings-help">
-              {catalog.length} servers from the MCP registry
-              {catalogLoading && <span className="catalog-loading"> · loading more…</span>}
-            </span>
+            <h2>
+              Catalog
+              <span className="settings-help">
+                {' '}· {catalog.length} servers
+                {catalogLoading && <span className="catalog-loading"> · loading more…</span>}
+              </span>
+            </h2>
+            <button className="btn-primary" onClick={() => setShowAdd(true)}>
+              + Add upstream
+            </button>
           </div>
           <input
             type="search"
@@ -199,14 +227,20 @@ export default function Settings() {
               />
             ))}
           </div>
-          {hiddenCount > 0 && (
-            <div className="settings-help">
-              {hiddenCount} more match{hiddenCount === 1 ? 'es' : ''} — refine the search to narrow down.
-            </div>
-          )}
-          {filteredCatalog.length === 0 && (
-            <div className="empty">No catalog entries match your search.</div>
-          )}
+          <div className="catalog-footer">
+            {filteredCatalog.length === 0 ? (
+              <span>No catalog entries match your search.</span>
+            ) : hiddenCount > 0 ? (
+              <span>
+                Showing {visibleCatalog.length} of {filteredCatalog.length} matches — refine the
+                search to narrow down.
+              </span>
+            ) : (
+              <span>
+                {filteredCatalog.length} match{filteredCatalog.length === 1 ? '' : 'es'}
+              </span>
+            )}
+          </div>
         </section>
       )}
 

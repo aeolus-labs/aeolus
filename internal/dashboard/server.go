@@ -334,7 +334,7 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 
 	var newCfg config.Config
 	if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "Couldn't parse the config payload as JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	// Merge in any preserved secrets before validating: masked env values in
@@ -344,7 +344,7 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 	s.cfgMu.RUnlock()
 	preserveMaskedEnv(&newCfg, currentCfg)
 	if err := config.Validate(&newCfg); err != nil {
-		http.Error(w, "invalid config: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "Config validation failed: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -355,16 +355,20 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 
 	yamlBytes, err := yaml.Marshal(&newCfg)
 	if err != nil {
-		http.Error(w, "yaml marshal: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Couldn't serialize config to YAML: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if err := atomicWriteFile(path, yamlBytes); err != nil {
-		http.Error(w, "write config: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Couldn't write "+path+": "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	if err := reload(r.Context(), &newCfg); err != nil {
-		http.Error(w, "reload failed: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w,
+			"Config saved to "+path+", but reload failed: "+err.Error()+
+				"\n\nThe previous config is still running. Fix the new config and save again, "+
+				"or restart aeolus to load whatever is currently on disk.",
+			http.StatusInternalServerError)
 		return
 	}
 
@@ -402,7 +406,7 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 	}
 	var req probeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "Couldn't parse the probe request as JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	transport := req.Transport
@@ -412,16 +416,16 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 	switch transport {
 	case "stdio":
 		if req.Command == "" {
-			http.Error(w, "command is required for stdio probe", http.StatusBadRequest)
+			http.Error(w, "A command is required to probe a stdio upstream (e.g. \"npx\").", http.StatusBadRequest)
 			return
 		}
 	case "http":
 		if req.URL == "" {
-			http.Error(w, "url is required for http probe", http.StatusBadRequest)
+			http.Error(w, "A URL is required to probe an http upstream (e.g. https://example.com/mcp).", http.StatusBadRequest)
 			return
 		}
 	default:
-		http.Error(w, "unknown transport "+transport, http.StatusBadRequest)
+		http.Error(w, "Unknown transport \""+transport+"\" — expected stdio or http.", http.StatusBadRequest)
 		return
 	}
 
@@ -444,7 +448,7 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 	}
 	u, err := upstream.New(ctx, cfg, s.log)
 	if err != nil {
-		http.Error(w, "spawn failed: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "Couldn't start the upstream: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	defer u.Shutdown(2 * time.Second)
@@ -460,29 +464,29 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 	probeErr := func(prefix string, err error) {
 		// Give stderr a beat to flush before we read it.
 		time.Sleep(150 * time.Millisecond)
-		msg := prefix + ": " + err.Error()
+		msg := prefix + " " + err.Error()
 		if se := strings.TrimSpace(stderrBuf.String()); se != "" {
-			msg += "\n\nupstream stderr:\n" + se
+			msg += "\n\nUpstream stderr:\n" + se
 		}
 		http.Error(w, msg, http.StatusBadRequest)
 	}
 
 	if _, err := u.Initialize(ctx, mcp.Info{Name: "aeolus-probe", Version: "0.3.0"}); err != nil {
-		probeErr("initialize failed", err)
+		probeErr("The upstream didn't complete the MCP handshake.", err)
 		return
 	}
 	resp, err := u.Request(ctx, mcp.MethodToolsList, struct{}{})
 	if err != nil {
-		probeErr("tools/list failed", err)
+		probeErr("The upstream didn't respond to tools/list.", err)
 		return
 	}
 	if resp.Error != nil {
-		http.Error(w, "upstream error: "+resp.Error.Message, http.StatusBadRequest)
+		http.Error(w, "The upstream returned an error for tools/list: "+resp.Error.Message, http.StatusBadRequest)
 		return
 	}
 	var result mcp.ToolsListResult
 	if err := json.Unmarshal(resp.Result, &result); err != nil {
-		http.Error(w, "parse failed: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Couldn't parse the tools/list response from the upstream: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -542,7 +546,7 @@ func (s *Server) cleanupOrphanedSecrets(old, new *config.Config) {
 func (s *Server) handleSecret(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimPrefix(r.URL.Path, "/api/secrets/")
 	if name == "" || strings.Contains(name, "/") {
-		http.Error(w, "secret name required", http.StatusBadRequest)
+		http.Error(w, "A secret name is required in the URL path (e.g. /api/secrets/myserver.MY_TOKEN).", http.StatusBadRequest)
 		return
 	}
 	switch r.Method {
@@ -551,26 +555,26 @@ func (s *Server) handleSecret(w http.ResponseWriter, r *http.Request) {
 			Value string `json:"value"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			http.Error(w, "Couldn't parse the request body as JSON: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 		if body.Value == "" {
-			http.Error(w, "value is required", http.StatusBadRequest)
+			http.Error(w, "The secret value cannot be empty.", http.StatusBadRequest)
 			return
 		}
 		if err := secrets.Set(name, body.Value); err != nil {
-			http.Error(w, "keychain write failed: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "Couldn't store the secret in the OS keychain: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
 	case http.MethodDelete:
 		if err := secrets.Delete(name); err != nil {
-			http.Error(w, "keychain delete failed: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "Couldn't remove the secret from the OS keychain: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, "Method "+r.Method+" not allowed on this endpoint.", http.StatusMethodNotAllowed)
 	}
 }
 

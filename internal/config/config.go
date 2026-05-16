@@ -69,10 +69,10 @@ func (c *Config) validate() error {
 	seen := make(map[string]bool, len(c.Upstreams))
 	for i, u := range c.Upstreams {
 		if u.Name == "" {
-			return fmt.Errorf("upstreams[%d]: name is required", i)
+			return fmt.Errorf("upstream at position %d is missing a name", i)
 		}
 		if seen[u.Name] {
-			return fmt.Errorf("upstreams[%d]: duplicate name %q", i, u.Name)
+			return fmt.Errorf("upstream at position %d reuses the name %q — names must be unique", i, u.Name)
 		}
 		seen[u.Name] = true
 		transport := u.Transport
@@ -83,14 +83,14 @@ func (c *Config) validate() error {
 		switch transport {
 		case "stdio":
 			if u.Command == "" {
-				return fmt.Errorf("upstreams[%d] (%s): command is required for stdio transport", i, u.Name)
+				return fmt.Errorf("upstream %q needs a command for stdio transport (e.g. \"npx\")", u.Name)
 			}
 		case "http":
 			if u.URL == "" {
-				return fmt.Errorf("upstreams[%d] (%s): url is required for http transport", i, u.Name)
+				return fmt.Errorf("upstream %q needs a url for http transport (e.g. https://example.com/mcp)", u.Name)
 			}
 		default:
-			return fmt.Errorf("upstreams[%d] (%s): unknown transport %q (expected stdio or http)", i, u.Name, transport)
+			return fmt.Errorf("upstream %q has unknown transport %q — expected \"stdio\" or \"http\"", u.Name, transport)
 		}
 	}
 	if c.Log.Level == "" {
@@ -102,7 +102,7 @@ func (c *Config) validate() error {
 	switch c.Log.Format {
 	case "json", "text":
 	default:
-		return fmt.Errorf("log.format must be json or text; got %q", c.Log.Format)
+		return fmt.Errorf("log.format must be \"json\" or \"text\"; got %q", c.Log.Format)
 	}
 	if c.Dashboard.Enabled && c.Dashboard.Addr == "" {
 		c.Dashboard.Addr = "localhost:8765"

@@ -65,17 +65,17 @@ func TestLoad_Errors(t *testing.T) {
 		{
 			"missing name",
 			"upstreams:\n  - command: cat\n",
-			"name is required",
+			"missing a name",
 		},
 		{
 			"missing command",
 			"upstreams:\n  - name: x\n",
-			"command is required",
+			"needs a command",
 		},
 		{
 			"duplicate name",
 			"upstreams:\n  - name: x\n    command: cat\n  - name: x\n    command: cat\n",
-			"duplicate name",
+			"reuses the name",
 		},
 		{
 			"bad log format",

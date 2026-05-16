@@ -20,9 +20,10 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
   const isEdit = !!editing
 
   const [source, setSource] = useState<Source>(prefill ? 'custom' : 'catalog')
-  const [step, setStep] = useState<'pick' | 'probe' | 'tools'>(
-    isEdit || prefill ? 'probe' : 'pick'
+  const [step, setStep] = useState<'pick' | 'form'>(
+    isEdit || prefill ? 'form' : 'pick'
   )
+  const [modalTab, setModalTab] = useState<'setup' | 'tools'>('setup')
 
   const [name, setName] = useState(editing?.name ?? '')
   const [transport, setTransport] = useState<'stdio' | 'http'>(
@@ -45,20 +46,38 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
   const [probing, setProbing] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [pendingAutoProbe, setPendingAutoProbe] = useState(false)
 
   const filteredCatalog = useMemo(
     () => applyCatalogFilters(catalog, catalogSearch, catalogFilters).slice(0, 40),
     [catalog, catalogSearch, catalogFilters]
   )
 
-  // If we opened with a catalog prefill, apply it once on mount. Safe because
-  // applyCatalog only touches state setters and is idempotent for the same entry.
+  // If we opened with a catalog prefill, apply it once on mount and
+  // auto-probe whenever the entry doesn't require any auth — saves a click
+  // for "just want to try this server" entries (filesystem, memory, etc.).
   useEffect(() => {
     if (prefill) {
       applyCatalog(prefill)
+      const needsAuth =
+        (prefill.env && Object.keys(prefill.env).length > 0) ||
+        (prefill.headers && Object.keys(prefill.headers).length > 0)
+      if (!needsAuth) {
+        setPendingAutoProbe(true)
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Fire the auto-probe on the next render — by then state setters from
+  // applyCatalog have flushed so probe() reads the right values.
+  useEffect(() => {
+    if (pendingAutoProbe && !probing && !probedTools) {
+      setPendingAutoProbe(false)
+      probe()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingAutoProbe])
 
   function applyCatalog(entry: CatalogEntry) {
     const slug = lastSegment(entry.id) || entry.name
@@ -90,7 +109,8 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
       setUrl('')
       setHeaderEntries([])
     }
-    setStep('probe')
+    setStep('form')
+    setModalTab('setup')
   }
 
   async function probe() {
@@ -120,7 +140,7 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
       const data = (await r.json()) as { tools: ProbedTool[] }
       setProbedTools(data.tools)
       setSelectedTools(new Set(data.tools.map((t) => t.name)))
-      setStep('tools')
+      setModalTab('tools')
       if (prefill) clearKnownBad(prefill.id)
     } catch (err: unknown) {
       setError(errMsg(err))
@@ -212,7 +232,7 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
           <button className="modal-close" onClick={onClose} aria-label="Close">×</button>
         </header>
 
-        {!isEdit && (
+        {!isEdit && !prefill && (
           <div className="modal-tabs">
             <button
               className={`tab ${source === 'catalog' ? 'tab-active' : ''}`}
@@ -222,14 +242,31 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
             </button>
             <button
               className={`tab ${source === 'custom' ? 'tab-active' : ''}`}
-              onClick={() => { setSource('custom'); setStep('probe') }}
+              onClick={() => { setSource('custom'); setStep('form') }}
             >
               Custom
             </button>
           </div>
         )}
+        {prefill && !isEdit && (
+          <div className="modal-source-line">
+            <span className="modal-source-label">From catalog:</span>{' '}
+            <span className="mono">{prefill.id}</span>
+          </div>
+        )}
 
-        {error && <div className="modal-error">{error}</div>}
+        {error && (
+          <div className="modal-error">
+            <span className="modal-error-text">{error}</span>
+            <button
+              className="modal-error-dismiss"
+              onClick={() => setError(null)}
+              aria-label="Dismiss error"
+            >
+              ×
+            </button>
+          </div>
+        )}
 
         {source === 'catalog' && step === 'pick' && (
           <CatalogStep
@@ -242,64 +279,78 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
           />
         )}
 
-        {(step === 'probe' || step === 'tools') && (
-          <FormStep
-            name={name}
-            onName={setName}
-            transport={transport}
-            onTransport={setTransport}
-            command={command}
-            onCommand={setCommand}
-            args={args}
-            onArgs={setArgs}
-            envEntries={envEntries}
-            onEnvEntries={setEnvEntries}
-            url={url}
-            onUrl={setUrl}
-            headerEntries={headerEntries}
-            onHeaderEntries={setHeaderEntries}
-          />
-        )}
-
-        {step === 'tools' && probedTools && (
-          <ToolPicker
-            tools={probedTools}
-            selected={selectedTools}
-            onToggle={(name) => {
-              setSelectedTools((prev) => {
-                const next = new Set(prev)
-                next.has(name) ? next.delete(name) : next.add(name)
-                return next
-              })
-            }}
-            onSelectAll={() => setSelectedTools(new Set(probedTools.map((t) => t.name)))}
-            onSelectNone={() => setSelectedTools(new Set())}
-          />
-        )}
-
-        {(step === 'probe' || step === 'tools') && (
-          <footer className="modal-footer">
-            <button className="btn-secondary" onClick={onClose} disabled={saving}>Cancel</button>
-            {step === 'probe' && (
+        {step === 'form' && (
+          <>
+            <div className="modal-tabs modal-inner-tabs">
               <button
-                className="btn-primary"
+                className={`tab ${modalTab === 'setup' ? 'tab-active' : ''}`}
+                onClick={() => setModalTab('setup')}
+              >
+                Setup
+              </button>
+              <button
+                className={`tab ${modalTab === 'tools' ? 'tab-active' : ''}`}
+                onClick={() => probedTools && setModalTab('tools')}
+                disabled={!probedTools}
+                title={probedTools ? '' : 'Probe first to discover tools'}
+              >
+                Tools{probedTools ? ` (${selectedTools.size}/${probedTools.length})` : ''}
+              </button>
+            </div>
+
+            {modalTab === 'setup' && (
+              <FormStep
+                name={name}
+                onName={setName}
+                transport={transport}
+                onTransport={setTransport}
+                command={command}
+                onCommand={setCommand}
+                args={args}
+                onArgs={setArgs}
+                envEntries={envEntries}
+                onEnvEntries={setEnvEntries}
+                url={url}
+                onUrl={setUrl}
+                headerEntries={headerEntries}
+                onHeaderEntries={setHeaderEntries}
+              />
+            )}
+
+            {modalTab === 'tools' && probedTools && (
+              <ToolPicker
+                tools={probedTools}
+                selected={selectedTools}
+                onToggle={(name) => {
+                  setSelectedTools((prev) => {
+                    const next = new Set(prev)
+                    next.has(name) ? next.delete(name) : next.add(name)
+                    return next
+                  })
+                }}
+                onSelectAll={() => setSelectedTools(new Set(probedTools.map((t) => t.name)))}
+                onSelectNone={() => setSelectedTools(new Set())}
+              />
+            )}
+
+            <footer className="modal-footer">
+              <button className="btn-secondary" onClick={onClose} disabled={saving}>Cancel</button>
+              <button
+                className={probedTools ? 'btn-secondary' : 'btn-primary'}
                 onClick={probe}
                 disabled={probing || (transport === 'stdio' ? !command : !url)}
               >
-                {probing ? 'Probing…' : 'Probe tools'}
+                {probing ? 'Probing…' : probedTools ? 'Re-probe' : 'Probe tools'}
               </button>
-            )}
-            {step === 'tools' && (
-              <>
-                <button className="btn-secondary" onClick={() => setStep('probe')} disabled={saving}>
-                  Re-probe
-                </button>
+              {probedTools && (
                 <button className="btn-primary" onClick={save} disabled={saving}>
-                  {saving ? 'Saving…' : `Save (${selectedTools.size} tools)`}
+                  {saving
+                    ? 'Saving…'
+                    : `Save (${selectedTools.size} tool${selectedTools.size === 1 ? '' : 's'})`}
                 </button>
-              </>
-            )}
-          </footer>
+              )}
+            </footer>
+          </>
         )}
       </div>
     </div>

@@ -7,8 +7,26 @@ type View = 'servers' | 'live'
 const MAX_EVENTS = 500
 const TOP_STATS = 5
 
+const SIDEBAR_COLLAPSED_KEY = 'aeolus.sidebarCollapsed'
+
 export default function App() {
   const [view, setView] = useState<View>('servers')
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1'
+    } catch {
+      return false
+    }
+  })
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? '1' : '0')
+    } catch {
+      /* ignore */
+    }
+  }, [sidebarCollapsed])
+
   const [events, setEvents] = useState<ToolCallEvent[]>([])
   const [connected, setConnected] = useState(false)
   const [search, setSearch] = useState('')
@@ -67,13 +85,24 @@ export default function App() {
       </header>
 
       <div className="body">
-        <nav className="sidebar">
-          <SidebarItem active={view === 'servers'} onClick={() => setView('servers')} label="Servers">
-            <ServersIcon />
-          </SidebarItem>
-          <SidebarItem active={view === 'live'} onClick={() => setView('live')} label="Live">
-            <LiveIcon />
-          </SidebarItem>
+        <nav className={`sidebar ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+          <div className="sidebar-items">
+            <SidebarItem active={view === 'servers'} onClick={() => setView('servers')} label="Servers">
+              <ServersIcon />
+            </SidebarItem>
+            <SidebarItem active={view === 'live'} onClick={() => setView('live')} label="Live">
+              <LiveIcon />
+            </SidebarItem>
+          </div>
+          <button
+            className="sidebar-toggle"
+            onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+            title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            <ChevronIcon flipped={sidebarCollapsed} />
+            {!sidebarCollapsed && <span className="sidebar-label">Collapse</span>}
+          </button>
         </nav>
 
         <div className="main-col">
@@ -138,6 +167,24 @@ function LiveIcon() {
   return (
     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+    </svg>
+  )
+}
+
+function ChevronIcon({ flipped }: { flipped: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="16"
+      height="16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ transform: flipped ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}
+    >
+      <polyline points="15 18 9 12 15 6" />
     </svg>
   )
 }
