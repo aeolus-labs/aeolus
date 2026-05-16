@@ -18,6 +18,7 @@ import (
 	"github.com/aeolus-labs/aeolus/internal/mcp"
 	"github.com/aeolus-labs/aeolus/internal/proxy"
 	"github.com/aeolus-labs/aeolus/internal/upstream"
+	"github.com/aeolus-labs/aeolus/internal/watcher"
 )
 
 const shutdownTimeout = 3 * time.Second
@@ -106,21 +107,50 @@ func run(configPath string) error {
 	filter := proxy.NewToolFilter(cfg.Tools)
 	p := proxy.New(clientConn, upstreams, filter, logger, observer)
 
-	if dashSrv != nil {
-		dashSrv.SetReloader(configPath, func(reloadCtx context.Context, newCfg *config.Config) error {
-			newUpstreams, err := startUpstreams(reloadCtx, newCfg.Upstreams, logger)
-			if err != nil {
-				return err
+	// Single source of truth for "apply a new config to the running proxy."
+	// Both the dashboard PUT handler and the file watcher route through this.
+	reloadProxy := func(reloadCtx context.Context, newCfg *config.Config) error {
+		newUpstreams, err := startUpstreams(reloadCtx, newCfg.Upstreams, logger)
+		if err != nil {
+			return err
+		}
+		if err := p.Reload(reloadCtx, newUpstreams, proxy.NewToolFilter(newCfg.Tools)); err != nil {
+			for _, u := range newUpstreams {
+				u.Shutdown(2 * time.Second)
 			}
-			if err := p.Reload(reloadCtx, newUpstreams, proxy.NewToolFilter(newCfg.Tools)); err != nil {
-				for _, u := range newUpstreams {
-					u.Shutdown(2 * time.Second)
-				}
-				return err
-			}
-			return nil
-		})
+			return err
+		}
+		if dashSrv != nil {
+			dashSrv.SetConfig(newCfg)
+		}
+		return nil
 	}
+
+	if dashSrv != nil {
+		dashSrv.SetReloader(configPath, reloadProxy)
+	}
+
+	// File watcher: hand edits to aeolus.yaml (outside the dashboard) get
+	// picked up automatically. The dashboard's own writes flow through
+	// reloadProxy first; the watcher then fires and re-reloads, which is
+	// wasteful but harmless — the second reload is a no-op-shaped pass.
+	go func() {
+		err := watcher.Watch(ctx, configPath, 250*time.Millisecond, func() {
+			newCfg, err := config.Load(configPath)
+			if err != nil {
+				logger.Warn("watcher_config_load_failed", "error", err.Error())
+				return
+			}
+			if err := reloadProxy(ctx, newCfg); err != nil {
+				logger.Error("watcher_reload_failed", "error", err.Error())
+				return
+			}
+			logger.Info("watcher_reloaded")
+		}, logger)
+		if err != nil {
+			logger.Warn("watcher_failed", "error", err.Error())
+		}
+	}()
 
 	runErr := p.Run(ctx)
 	cancel()

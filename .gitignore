@@ -20,5 +20,8 @@ coverage.txt
 *.local.yaml
 aeolus.yaml
 run-aeolus.sh
+
+# Local strategy / context notes (not shipped)
+PRODUCT_CONTEXT.md
 .env
 .env.local
