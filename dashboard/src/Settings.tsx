@@ -3,6 +3,7 @@ import { api } from './api'
 import type { AeolusConfig, CatalogEntry, Upstream } from './types'
 import AddUpstream from './AddUpstream'
 import { applyCatalogFilters, type CatalogFilters } from './catalogFilters'
+import { loadKnownBad } from './knownBad'
 
 const CATALOG_DISPLAY_LIMIT = 60
 
@@ -19,7 +20,6 @@ export default function Settings() {
   const [catalogFilters, setCatalogFilters] = useState<CatalogFilters>({
     transport: 'all',
     auth: 'all',
-    source: 'all',
   })
   const [error, setError] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
@@ -27,6 +27,7 @@ export default function Settings() {
   const [prefill, setPrefill] = useState<CatalogEntry | null>(null)
   const [removing, setRemoving] = useState<string | null>(null)
   const [settingsTab, setSettingsTab] = useState<'upstreams' | 'catalog'>('upstreams')
+  const [knownBad, setKnownBad] = useState<Set<string>>(() => loadKnownBad())
 
   useEffect(() => {
     api.config().then(setConfig).catch((err) => setError(err.message))
@@ -174,6 +175,7 @@ export default function Settings() {
               <CatalogCard
                 key={e.id}
                 entry={e}
+                failedProbe={knownBad.has(e.id)}
                 onAdd={() => {
                   setPrefill(e)
                   setShowAdd(true)
@@ -202,12 +204,14 @@ export default function Settings() {
             setShowAdd(false)
             setEditing(null)
             setPrefill(null)
+            setKnownBad(loadKnownBad())
           }}
           onSaved={(next) => {
             setConfig(next)
             setShowAdd(false)
             setEditing(null)
             setPrefill(null)
+            setKnownBad(loadKnownBad())
           }}
         />
       )}
@@ -336,11 +340,6 @@ function CatalogFilterBar({
         <FilterOption active={filters.auth === 'none'} onClick={() => onChange({ ...filters, auth: 'none' })}>No auth</FilterOption>
         <FilterOption active={filters.auth === 'required'} onClick={() => onChange({ ...filters, auth: 'required' })}>Auth required</FilterOption>
       </FilterGroup>
-      <FilterGroup label="Source">
-        <FilterOption active={filters.source === 'all'} onClick={() => onChange({ ...filters, source: 'all' })}>All</FilterOption>
-        <FilterOption active={filters.source === 'official'} onClick={() => onChange({ ...filters, source: 'official' })}>Official</FilterOption>
-        <FilterOption active={filters.source === 'community'} onClick={() => onChange({ ...filters, source: 'community' })}>Community</FilterOption>
-      </FilterGroup>
     </div>
   )
 }
@@ -362,13 +361,21 @@ function FilterOption({ active, onClick, children }: { active: boolean; onClick:
   )
 }
 
-function CatalogCard({ entry, onAdd }: { entry: CatalogEntry; onAdd: () => void }) {
+function CatalogCard({
+  entry,
+  failedProbe,
+  onAdd,
+}: {
+  entry: CatalogEntry
+  failedProbe: boolean
+  onAdd: () => void
+}) {
   const needsAuth =
     (entry.env && Object.keys(entry.env).length > 0) ||
     (entry.headers && Object.keys(entry.headers).length > 0)
   const transport = entry.transport === 'http' ? 'http' : 'stdio'
   return (
-    <div className="card">
+    <div className={`card ${failedProbe ? 'card-dim' : ''}`}>
       <div className="card-header">
         <span className="card-title">{entry.name}</span>
         <span className="badge">{transport}</span>
@@ -390,6 +397,14 @@ function CatalogCard({ entry, onAdd }: { entry: CatalogEntry; onAdd: () => void 
       <div className="card-footer card-footer-spaced">
         <span className="card-footer-slot">
           {needsAuth && <span className="badge badge-warn">needs auth</span>}
+          {failedProbe && (
+            <span
+              className="badge badge-danger"
+              title="A previous probe failed on this machine. Click Add to try again — a successful probe will clear this."
+            >
+              probe failed
+            </span>
+          )}
         </span>
         <button className="btn-primary" onClick={onAdd}>Add</button>
       </div>

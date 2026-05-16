@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import type { AeolusConfig, CatalogEntry, Upstream } from './types'
 import { applyCatalogFilters, type CatalogFilters } from './catalogFilters'
+import { clearKnownBad, markKnownBad } from './knownBad'
 
 type Source = 'catalog' | 'custom'
 
@@ -36,7 +37,6 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
   const [catalogFilters, setCatalogFilters] = useState<CatalogFilters>({
     transport: 'all',
     auth: 'all',
-    source: 'all',
   })
 
   const [probedTools, setProbedTools] = useState<ProbedTool[] | null>(null)
@@ -121,8 +121,16 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
       setProbedTools(data.tools)
       setSelectedTools(new Set(data.tools.map((t) => t.name)))
       setStep('tools')
+      if (prefill) clearKnownBad(prefill.id)
     } catch (err: unknown) {
       setError(errMsg(err))
+      // Only mark the catalog entry as known-bad if the user actually
+      // supplied every required env/header it declared. If they left
+      // a required field empty, the probe failure is a user-side
+      // missing-input, not a catalog defect.
+      if (prefill && !hasMissingRequiredAuth(prefill, envEntries, headerEntries)) {
+        markKnownBad(prefill.id)
+      }
     } finally {
       setProbing(false)
     }
@@ -348,11 +356,6 @@ function ModalCatalogFilterBar({
         <button type="button" className={`segment ${filters.auth === 'all' ? 'segment-active' : ''}`} onClick={() => onChange({ ...filters, auth: 'all' })}>Any auth</button>
         <button type="button" className={`segment ${filters.auth === 'none' ? 'segment-active' : ''}`} onClick={() => onChange({ ...filters, auth: 'none' })}>No auth</button>
         <button type="button" className={`segment ${filters.auth === 'required' ? 'segment-active' : ''}`} onClick={() => onChange({ ...filters, auth: 'required' })}>Auth req.</button>
-      </div>
-      <div className="segmented filter-segmented">
-        <button type="button" className={`segment ${filters.source === 'all' ? 'segment-active' : ''}`} onClick={() => onChange({ ...filters, source: 'all' })}>All</button>
-        <button type="button" className={`segment ${filters.source === 'official' ? 'segment-active' : ''}`} onClick={() => onChange({ ...filters, source: 'official' })}>Official</button>
-        <button type="button" className={`segment ${filters.source === 'community' ? 'segment-active' : ''}`} onClick={() => onChange({ ...filters, source: 'community' })}>Community</button>
       </div>
     </div>
   )
@@ -627,6 +630,27 @@ function stripUpstreamRules(rules: string[] | undefined, upstreamName: string): 
 // EnvRow is the in-modal representation of one env var. `secure` is true
 // when the value is (or will be on save) backed by the OS keychain.
 type EnvRow = { key: string; value: string; secure: boolean }
+
+// hasMissingRequiredAuth returns true when the catalog entry declared one
+// or more required env / header keys but the user left at least one of
+// them empty. Used to avoid marking a catalog entry as "known bad" when
+// the probe failure is actually a user-side missing input.
+function hasMissingRequiredAuth(
+  entry: CatalogEntry,
+  envRows: EnvRow[],
+  headerRows: EnvRow[],
+): boolean {
+  const requiredEnv = new Set(Object.keys(entry.env ?? {}))
+  const requiredHeaders = new Set(Object.keys(entry.headers ?? {}))
+  if (requiredEnv.size === 0 && requiredHeaders.size === 0) return false
+  for (const r of envRows) {
+    if (requiredEnv.has(r.key) && !r.value) return true
+  }
+  for (const r of headerRows) {
+    if (requiredHeaders.has(r.key) && !r.value) return true
+  }
+  return false
+}
 
 function parseEnv(env?: string[]): EnvRow[] {
   if (!env) return []

@@ -524,6 +524,25 @@ body {
   border-color: rgba(255, 184, 0, 0.3);
 }
 
+.badge-danger {
+  background: rgba(248, 81, 73, 0.12);
+  color: var(--error);
+  border-color: rgba(248, 81, 73, 0.3);
+}
+
+.card-dim {
+  opacity: 0.6;
+}
+
+.card-dim:hover {
+  opacity: 1;
+}
+
+.card-footer-slot {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .card-footer-slot {
   display: inline-flex;
   align-items: center;

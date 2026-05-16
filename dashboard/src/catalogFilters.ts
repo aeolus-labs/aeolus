@@ -1,12 +1,16 @@
 import type { CatalogEntry } from './types'
 
+// Filters on top of the MCP Registry's published metadata. We currently
+// only filter on dimensions the registry actually exposes:
+// - transport: derived from packages (stdio) vs remotes (http)
+// - auth: derived from declared environmentVariables / headers
+// We deliberately don't have an "official" filter because the registry
+// has no "verified publisher" signal — every entry is community-published.
+
 export type CatalogFilters = {
   transport: 'all' | 'stdio' | 'http'
   auth: 'all' | 'none' | 'required'
-  source: 'all' | 'official' | 'community'
 }
-
-const OFFICIAL_NAMESPACE = 'io.github.modelcontextprotocol/'
 
 export function applyCatalogFilters(
   catalog: CatalogEntry[],
@@ -32,11 +36,6 @@ export function applyCatalogFilters(
         (e.headers && Object.keys(e.headers).length > 0)
       if (filters.auth === 'none' && needsAuth) return false
       if (filters.auth === 'required' && !needsAuth) return false
-    }
-    if (filters.source !== 'all') {
-      const isOfficial = e.id.startsWith(OFFICIAL_NAMESPACE)
-      if (filters.source === 'official' && !isOfficial) return false
-      if (filters.source === 'community' && isOfficial) return false
     }
     return true
   })
