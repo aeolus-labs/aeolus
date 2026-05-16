@@ -130,10 +130,26 @@ export default function Settings() {
             </button>
           </div>
           {(config.upstreams ?? []).length === 0 ? (
-            <div className="empty">
-              No upstreams configured. Add one from the{' '}
-              <button className="link" onClick={() => setSettingsTab('catalog')}>Catalog</button>
-              {' '}or click "+ Add upstream" to enter a custom command.
+            <div className="welcome">
+              <h3>Welcome to Aeolus</h3>
+              <p>
+                No upstreams yet. An <strong>upstream</strong> is an MCP server
+                Aeolus will proxy for your client (Claude Code, Cursor,
+                Copilot, etc.).
+              </p>
+              <p>Two ways to add your first one:</p>
+              <div className="welcome-actions">
+                <button className="btn-primary" onClick={() => setSettingsTab('catalog')}>
+                  Browse catalog →
+                </button>
+                <button className="btn-secondary" onClick={() => setShowAdd(true)}>
+                  + Add custom upstream
+                </button>
+              </div>
+              <p className="welcome-hint">
+                Your <code>aeolus.yaml</code> lives on disk and reloads on every change.
+                Edit it by hand or use the dashboard — both work.
+              </p>
             </div>
           ) : (
             <div className="upstream-grid">

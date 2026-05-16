@@ -2,13 +2,13 @@ import { useEffect, useMemo, useState } from 'react'
 import type { ToolCallEvent } from './types'
 import Settings from './Settings'
 
-type View = 'live' | 'settings'
+type View = 'servers' | 'live'
 
 const MAX_EVENTS = 500
 const TOP_STATS = 5
 
 export default function App() {
-  const [view, setView] = useState<View>('live')
+  const [view, setView] = useState<View>('servers')
   const [events, setEvents] = useState<ToolCallEvent[]>([])
   const [connected, setConnected] = useState(false)
   const [search, setSearch] = useState('')
@@ -55,32 +55,30 @@ export default function App() {
       <header className="header">
         <div className="brand">
           <span className="logo">Aeolus</span>
-          <span className="version">v0.3.0-dev</span>
+          <span className="version">v0.3.10-dev</span>
           <span className={`conn conn-${connected ? 'on' : 'off'}`}>
             {connected ? 'live' : 'disconnected'}
           </span>
         </div>
-        <nav className="tabs">
-          <button
-            className={`tab ${view === 'live' ? 'tab-active' : ''}`}
-            onClick={() => setView('live')}
-          >
-            Live
-          </button>
-          <button
-            className={`tab ${view === 'settings' ? 'tab-active' : ''}`}
-            onClick={() => setView('settings')}
-          >
-            Settings
-          </button>
-        </nav>
         <div className="stats">
           <Stat label="calls" value={total} />
           <Stat label="errors" value={errors} tone={errors > 0 ? 'error' : 'normal'} />
         </div>
       </header>
 
-      {view === 'settings' ? (
+      <div className="body">
+        <nav className="sidebar">
+          <SidebarItem active={view === 'servers'} onClick={() => setView('servers')} label="Servers">
+            <ServersIcon />
+          </SidebarItem>
+          <SidebarItem active={view === 'live'} onClick={() => setView('live')} label="Live">
+            <LiveIcon />
+          </SidebarItem>
+        </nav>
+
+        <div className="main-col">
+
+      {view === 'servers' ? (
         <Settings />
       ) : (
         <LiveView
@@ -96,7 +94,51 @@ export default function App() {
           onStatusFilter={setStatusFilter}
         />
       )}
+        </div>
+      </div>
     </div>
+  )
+}
+
+function SidebarItem({
+  active,
+  onClick,
+  label,
+  children,
+}: {
+  active: boolean
+  onClick: () => void
+  label: string
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      className={`sidebar-item ${active ? 'sidebar-item-active' : ''}`}
+      onClick={onClick}
+      title={label}
+    >
+      <span className="sidebar-icon">{children}</span>
+      <span className="sidebar-label">{label}</span>
+    </button>
+  )
+}
+
+function ServersIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="6" rx="2" />
+      <rect x="3" y="14" width="18" height="6" rx="2" />
+      <line x1="7" y1="7" x2="7.01" y2="7" />
+      <line x1="7" y1="17" x2="7.01" y2="17" />
+    </svg>
+  )
+}
+
+function LiveIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+    </svg>
   )
 }
 

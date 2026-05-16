@@ -63,11 +63,6 @@ func TestLoad_Errors(t *testing.T) {
 		wantSub string
 	}{
 		{
-			"no upstreams",
-			"upstreams: []\n",
-			"at least one upstream",
-		},
-		{
 			"missing name",
 			"upstreams:\n  - command: cat\n",
 			"name is required",

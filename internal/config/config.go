@@ -64,9 +64,8 @@ func Load(path string) (*Config, error) {
 func Validate(c *Config) error { return c.validate() }
 
 func (c *Config) validate() error {
-	if len(c.Upstreams) == 0 {
-		return fmt.Errorf("at least one upstream is required")
-	}
+	// Empty upstreams is fine — useful for first-run, where the user runs
+	// `aeolus init` and then adds upstreams via the dashboard.
 	seen := make(map[string]bool, len(c.Upstreams))
 	for i, u := range c.Upstreams {
 		if u.Name == "" {

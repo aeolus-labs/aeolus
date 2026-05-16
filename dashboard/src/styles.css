@@ -32,9 +32,9 @@ body {
 
 .app {
   min-height: 100vh;
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 0 24px;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
 }
 
 /* Header */
@@ -44,7 +44,8 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  padding: 24px 0;
+  padding: 16px 24px;
+  flex: 0 0 auto;
   border-bottom: 1px solid var(--border);
 }
 
@@ -121,6 +122,70 @@ body {
   color: var(--text);
   background: var(--bg-secondary);
   border-color: var(--border);
+}
+
+/* Left sidebar + body split */
+
+.body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  gap: 0;
+}
+
+.sidebar {
+  width: 140px;
+  flex: 0 0 140px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 16px 8px;
+  border-right: 1px solid var(--border);
+}
+
+.sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-family: var(--sans);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.1s, color 0.1s;
+}
+
+.sidebar-item:hover {
+  background: var(--bg-secondary);
+  color: var(--text);
+}
+
+.sidebar-item-active {
+  background: var(--bg-secondary);
+  color: var(--text);
+}
+
+.sidebar-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+}
+
+.sidebar-label {
+  flex: 1;
+}
+
+.main-col {
+  flex: 1;
+  min-width: 0;
+  padding: 0 24px;
+  overflow-y: auto;
 }
 
 .stats {
@@ -280,6 +345,49 @@ body {
   color: var(--text-muted);
   border: 1px dashed var(--border);
   border-radius: 8px;
+}
+
+.welcome {
+  padding: 40px 32px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  max-width: 640px;
+}
+
+.welcome h3 {
+  margin: 0 0 16px;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.welcome p {
+  margin: 0 0 14px;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.welcome p code {
+  background: var(--bg);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 12px;
+  border: 1px solid var(--border);
+}
+
+.welcome-actions {
+  display: flex;
+  gap: 10px;
+  margin: 18px 0 20px;
+}
+
+.welcome-hint {
+  font-size: 12px !important;
+  color: var(--text-muted) !important;
+  margin-top: 4px !important;
 }
 
 /* Table */
