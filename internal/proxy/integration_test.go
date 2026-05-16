@@ -99,7 +99,7 @@ func newRig(t *testing.T, tools config.Tools, fakes ...*fakeUpstream) *rig {
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	upstreams := make([]*upstream.Upstream, 0, len(fakes))
+	upstreams := make([]upstream.Server, 0, len(fakes))
 	upPipes := make([]net.Conn, 0, len(fakes)*2)
 	for _, f := range fakes {
 		proxySide, fakeSide := net.Pipe()

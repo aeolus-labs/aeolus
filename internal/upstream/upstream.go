@@ -1,5 +1,6 @@
-// Package upstream manages MCP servers running as stdio subprocesses,
-// exposing a request/response API on top of the raw JSON-RPC wire.
+// Package upstream manages connected MCP servers behind a transport-agnostic
+// Server interface. The current concrete type is *Upstream (stdio
+// subprocess); future transports (HTTP, etc.) will implement Server as well.
 package upstream
 
 import (
@@ -54,9 +55,24 @@ func resolveEnv(env []string) ([]string, error) {
 	return out, nil
 }
 
-// Upstream is a connected MCP server.
+// Server is the transport-agnostic interface every upstream satisfies.
+// Callers (proxy, dashboard probe) depend only on this, not the concrete
+// stdio or HTTP implementation.
+type Server interface {
+	Name() string
+	Initialize(ctx context.Context, clientInfo mcp.Info) (*mcp.InitializeResult, error)
+	Request(ctx context.Context, method string, params any) (*mcp.Message, error)
+	Notify(method string, params any) error
+	Notifications() <-chan *mcp.Message
+	Shutdown(timeout time.Duration)
+	// Stderr returns the upstream's stderr stream, or nil for transports
+	// without a subprocess.
+	Stderr() io.Reader
+}
+
+// Upstream is the stdio (subprocess) Server implementation.
 type Upstream struct {
-	Name string
+	name string
 
 	cmd         *exec.Cmd     // nil for non-subprocess upstreams (tests)
 	stdinCloser io.Closer     // nil for non-subprocess upstreams
@@ -75,12 +91,15 @@ type Upstream struct {
 	Done chan struct{}
 }
 
+// Name returns the configured upstream name.
+func (u *Upstream) Name() string { return u.name }
+
 // FromConn builds an Upstream from an existing MCP connection. The caller
 // owns the underlying transport; Upstream will not close it. Intended for
 // tests and future non-subprocess transports.
 func FromConn(name string, conn *mcp.Conn, log *slog.Logger) *Upstream {
 	u := &Upstream{
-		Name:    name,
+		name:    name,
 		conn:    conn,
 		log:     log,
 		pending: make(map[int64]chan *mcp.Message),
@@ -197,7 +216,7 @@ func (u *Upstream) Request(ctx context.Context, method string, params any) (*mcp
 	u.mu.Lock()
 	if u.closed {
 		u.mu.Unlock()
-		return nil, fmt.Errorf("upstream %s closed: %w", u.Name, u.closeErr)
+		return nil, fmt.Errorf("upstream %s closed: %w", u.name, u.closeErr)
 	}
 	u.pending[id] = ch
 	u.mu.Unlock()
@@ -225,7 +244,7 @@ func (u *Upstream) Request(ctx context.Context, method string, params any) (*mcp
 	select {
 	case resp, ok := <-ch:
 		if !ok {
-			return nil, fmt.Errorf("upstream %s closed: %w", u.Name, u.closeErr)
+			return nil, fmt.Errorf("upstream %s closed: %w", u.name, u.closeErr)
 		}
 		return resp, nil
 	case <-ctx.Done():
@@ -279,7 +298,7 @@ func (u *Upstream) readLoop() {
 			select {
 			case u.notif <- msg:
 			default:
-				u.log.Warn("upstream_notification_dropped", "upstream", u.Name, "method", msg.Method)
+				u.log.Warn("upstream_notification_dropped", "upstream", u.name, "method", msg.Method)
 			}
 		}
 	}

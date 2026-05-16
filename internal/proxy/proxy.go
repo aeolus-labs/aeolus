@@ -33,7 +33,7 @@ type Proxy struct {
 	// Protects upstreams + filter + cancels. Read by tools/list and tools/call
 	// hot paths (via short snapshots); written by Reload.
 	mu        sync.RWMutex
-	upstreams []*upstream.Upstream
+	upstreams []upstream.Server
 	filter    ToolFilter
 	cancels   []context.CancelFunc // notification watchers, one per upstream
 
@@ -55,7 +55,7 @@ type ToolCallObservation struct {
 type Observer func(ToolCallObservation)
 
 type toolEntry struct {
-	upstream     *upstream.Upstream
+	upstream     upstream.Server
 	originalName string
 	tool         mcp.Tool // tool.Name is the exposed (prefixed) name
 }
@@ -101,7 +101,7 @@ func matches(pattern, name string) bool {
 	return err == nil && ok
 }
 
-func New(client *mcp.Conn, upstreams []*upstream.Upstream, filter ToolFilter, log *slog.Logger, observer Observer) *Proxy {
+func New(client *mcp.Conn, upstreams []upstream.Server, filter ToolFilter, log *slog.Logger, observer Observer) *Proxy {
 	return &Proxy{
 		client:    client,
 		upstreams: upstreams,
@@ -139,15 +139,15 @@ func (p *Proxy) Run(ctx context.Context) error {
 
 // initUpstreams performs the MCP initialize handshake on each upstream.
 // Called for both initial startup and Reload.
-func (p *Proxy) initUpstreams(ctx context.Context, upstreams []*upstream.Upstream) error {
+func (p *Proxy) initUpstreams(ctx context.Context, upstreams []upstream.Server) error {
 	clientInfo := mcp.Info{Name: proxyName, Version: proxyVersion}
 	for _, u := range upstreams {
 		result, err := u.Initialize(ctx, clientInfo)
 		if err != nil {
-			return fmt.Errorf("initialize %s: %w", u.Name, err)
+			return fmt.Errorf("initialize %s: %w", u.Name(), err)
 		}
 		p.log.Info("upstream_initialized",
-			"name", u.Name,
+			"name", u.Name(),
 			"server", result.ServerInfo.Name,
 			"protocol", result.ProtocolVersion,
 		)
@@ -159,7 +159,7 @@ func (p *Proxy) initUpstreams(ctx context.Context, upstreams []*upstream.Upstrea
 // the client connection open. New upstreams must already be Start()-ed; this
 // method initializes them, swaps state, refreshes tools, notifies the client,
 // then shuts down the old upstreams.
-func (p *Proxy) Reload(ctx context.Context, newUpstreams []*upstream.Upstream, newFilter ToolFilter) error {
+func (p *Proxy) Reload(ctx context.Context, newUpstreams []upstream.Server, newFilter ToolFilter) error {
 	if err := p.initUpstreams(ctx, newUpstreams); err != nil {
 		// Initialization failed; tear down anything we started.
 		for _, u := range newUpstreams {
@@ -200,7 +200,7 @@ func (p *Proxy) Reload(ctx context.Context, newUpstreams []*upstream.Upstream, n
 	return nil
 }
 
-func (p *Proxy) watchUpstreamNotifications(ctx context.Context, u *upstream.Upstream) {
+func (p *Proxy) watchUpstreamNotifications(ctx context.Context, u upstream.Server) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -210,9 +210,9 @@ func (p *Proxy) watchUpstreamNotifications(ctx context.Context, u *upstream.Upst
 				return
 			}
 			if msg.Method == mcp.MethodToolsListChanged {
-				p.log.Info("upstream_tools_changed", "upstream", u.Name)
+				p.log.Info("upstream_tools_changed", "upstream", u.Name())
 				if err := p.refreshUpstream(ctx, u); err != nil {
-					p.log.Error("refresh_failed", "upstream", u.Name, "error", err.Error())
+					p.log.Error("refresh_failed", "upstream", u.Name(), "error", err.Error())
 					continue
 				}
 				_ = p.client.Write(&mcp.Message{
@@ -232,7 +232,7 @@ func (p *Proxy) toolCount() int {
 
 func (p *Proxy) refreshTools(ctx context.Context) error {
 	p.mu.RLock()
-	upstreams := append([]*upstream.Upstream(nil), p.upstreams...)
+	upstreams := append([]upstream.Server(nil), p.upstreams...)
 	p.mu.RUnlock()
 
 	next := make(map[string]toolEntry)
@@ -249,7 +249,7 @@ func (p *Proxy) refreshTools(ctx context.Context) error {
 
 // refreshUpstream replaces just one upstream's entries in the route map.
 // Called when the upstream sends tools/list_changed.
-func (p *Proxy) refreshUpstream(ctx context.Context, u *upstream.Upstream) error {
+func (p *Proxy) refreshUpstream(ctx context.Context, u upstream.Server) error {
 	fresh := make(map[string]toolEntry)
 	if err := fetchTools(ctx, u, fresh); err != nil {
 		return err
@@ -267,19 +267,19 @@ func (p *Proxy) refreshUpstream(ctx context.Context, u *upstream.Upstream) error
 	return nil
 }
 
-func fetchTools(ctx context.Context, u *upstream.Upstream, into map[string]toolEntry) error {
+func fetchTools(ctx context.Context, u upstream.Server, into map[string]toolEntry) error {
 	resp, err := u.Request(ctx, mcp.MethodToolsList, struct{}{})
 	if err != nil {
-		return fmt.Errorf("tools/list from %s: %w", u.Name, err)
+		return fmt.Errorf("tools/list from %s: %w", u.Name(), err)
 	}
 	if resp.Error != nil {
-		return fmt.Errorf("tools/list from %s: %s", u.Name, resp.Error.Message)
+		return fmt.Errorf("tools/list from %s: %s", u.Name(), resp.Error.Message)
 	}
 	var result mcp.ToolsListResult
 	if err := json.Unmarshal(resp.Result, &result); err != nil {
-		return fmt.Errorf("parse tools/list from %s: %w", u.Name, err)
+		return fmt.Errorf("parse tools/list from %s: %w", u.Name(), err)
 	}
-	prefix := u.Name + "."
+	prefix := u.Name() + "."
 	for _, t := range result.Tools {
 		exposed := prefix + t.Name
 		into[exposed] = toolEntry{
@@ -420,12 +420,12 @@ func (p *Proxy) routeToolsCall(ctx context.Context, msg *mcp.Message) error {
 	if err != nil {
 		p.log.Error("tools_call",
 			"tool", params.Name,
-			"upstream", entry.upstream.Name,
+			"upstream", entry.upstream.Name(),
 			"latency_ms", latency.Milliseconds(),
 			"status", "transport_error",
 			"error", err.Error(),
 		)
-		p.observe(params.Name, entry.upstream.Name, latency, "transport_error", started)
+		p.observe(params.Name, entry.upstream.Name(), latency, "transport_error", started)
 		return p.replyError(msg.ID, -32603, "Upstream error: "+err.Error())
 	}
 	status := "ok"
@@ -434,11 +434,11 @@ func (p *Proxy) routeToolsCall(ctx context.Context, msg *mcp.Message) error {
 	}
 	p.log.Info("tools_call",
 		"tool", params.Name,
-		"upstream", entry.upstream.Name,
+		"upstream", entry.upstream.Name(),
 		"latency_ms", latency.Milliseconds(),
 		"status", status,
 	)
-	p.observe(params.Name, entry.upstream.Name, latency, status, started)
+	p.observe(params.Name, entry.upstream.Name(), latency, status, started)
 	return p.client.Write(&mcp.Message{
 		JSONRPC: "2.0",
 		ID:      msg.ID,
