@@ -3,7 +3,6 @@ package proxy
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -23,7 +22,7 @@ type Engine struct {
 	// Protects upstreams + filter + cancels. Read by hot paths via
 	// short snapshots; written by Reload.
 	mu        sync.RWMutex
-	upstreams []upstream.Server
+	upstreams []upstream.Server // only successfully-initialized upstreams
 	filter    ToolFilter
 	cancels   []context.CancelFunc
 
@@ -32,33 +31,61 @@ type Engine struct {
 
 	subsMu sync.Mutex
 	subs   map[chan struct{}]struct{}
+
+	// shutdownCh is closed when Stop() is invoked. Long-lived consumers
+	// (the HTTP SSE handler, the stdio bridge via that SSE stream) watch
+	// it to send a goodbye notification before the daemon goes away.
+	shutdownMu sync.Mutex
+	shutdownCh chan struct{}
+
+	// failures records upstreams that couldn't be initialized so the
+	// dashboard / API can surface them. Keyed by upstream name.
+	failuresMu sync.RWMutex
+	failures   map[string]string
+}
+
+// UpstreamFailure is a single configured-but-not-running upstream.
+type UpstreamFailure struct {
+	Name  string `json:"name"`
+	Error string `json:"error"`
 }
 
 // NewEngine constructs an Engine. Call Start before issuing any
 // HandleInitialize / ListTools / CallTool requests.
 func NewEngine(upstreams []upstream.Server, filter ToolFilter, log *slog.Logger, observer Observer) *Engine {
 	return &Engine{
-		log:       log,
-		observer:  observer,
-		upstreams: upstreams,
-		filter:    filter,
-		toolMap:   make(map[string]toolEntry),
-		subs:      make(map[chan struct{}]struct{}),
+		log:        log,
+		observer:   observer,
+		upstreams:  upstreams,
+		filter:     filter,
+		toolMap:    make(map[string]toolEntry),
+		subs:       make(map[chan struct{}]struct{}),
+		failures:   make(map[string]string),
+		shutdownCh: make(chan struct{}),
 	}
 }
 
 // Start performs the MCP initialize handshake against every upstream,
 // builds the aggregated tool map, and launches per-upstream notification
-// watchers. Returns when init completes; the watchers keep running until
-// ctx is canceled or Stop is called.
+// watchers. Upstreams that fail to initialize are recorded but do not
+// block the daemon — the dashboard stays up, the working upstreams
+// serve traffic, and the failures surface in logs and via
+// FailedUpstreams(). The daemon as a whole only fails if the runtime
+// itself can't proceed (it currently never does).
+//
+// The watchers keep running until ctx is canceled or Stop is called.
 func (e *Engine) Start(ctx context.Context) error {
-	if err := e.initUpstreams(ctx, e.upstreams); err != nil {
-		return err
-	}
-	if err := e.refreshTools(ctx); err != nil {
-		return err
-	}
-	e.log.Info("tools_loaded", "count", e.toolCount())
+	working := e.initUpstreams(ctx, e.upstreams)
+	e.mu.Lock()
+	e.upstreams = working
+	e.mu.Unlock()
+
+	e.refreshTools(ctx)
+	e.log.Info("upstreams_ready",
+		"working", len(working),
+		"failed", e.failureCount(),
+		"tools", e.toolCount(),
+	)
 
 	e.mu.Lock()
 	for _, u := range e.upstreams {
@@ -73,22 +100,19 @@ func (e *Engine) Start(ctx context.Context) error {
 
 // Reload atomically swaps upstreams + filter. Subscribers (e.g. each
 // connected MCP client) receive a tools/list_changed nudge via the
-// SubscribeToolsChanged channel.
+// SubscribeToolsChanged channel. Best-effort like Start: upstreams that
+// fail to initialize are dropped from the active set and recorded as
+// failures, but the reload itself never fails.
 func (e *Engine) Reload(ctx context.Context, newUpstreams []upstream.Server, newFilter ToolFilter) error {
-	if err := e.initUpstreams(ctx, newUpstreams); err != nil {
-		for _, u := range newUpstreams {
-			u.Shutdown(2 * time.Second)
-		}
-		return err
-	}
+	working := e.initUpstreams(ctx, newUpstreams)
 
 	e.mu.Lock()
 	oldUpstreams := e.upstreams
 	oldCancels := e.cancels
-	e.upstreams = newUpstreams
+	e.upstreams = working
 	e.filter = newFilter
-	e.cancels = make([]context.CancelFunc, 0, len(newUpstreams))
-	for _, u := range newUpstreams {
+	e.cancels = make([]context.CancelFunc, 0, len(working))
+	for _, u := range working {
 		u := u
 		watcherCtx, c := context.WithCancel(ctx)
 		e.cancels = append(e.cancels, c)
@@ -96,9 +120,7 @@ func (e *Engine) Reload(ctx context.Context, newUpstreams []upstream.Server, new
 	}
 	e.mu.Unlock()
 
-	if err := e.refreshTools(ctx); err != nil {
-		e.log.Error("reload_refresh_failed", "error", err.Error())
-	}
+	e.refreshTools(ctx)
 	e.broadcastToolsChanged()
 
 	for _, c := range oldCancels {
@@ -107,12 +129,34 @@ func (e *Engine) Reload(ctx context.Context, newUpstreams []upstream.Server, new
 	for _, u := range oldUpstreams {
 		u.Shutdown(3 * time.Second)
 	}
-	e.log.Info("reload_complete", "upstreams", len(newUpstreams), "tools", e.toolCount())
+	e.log.Info("reload_complete",
+		"working", len(working),
+		"failed", e.failureCount(),
+		"tools", e.toolCount(),
+	)
 	return nil
 }
 
-// Stop tears down watchers and shuts upstreams down in parallel.
+// Stop tears down watchers and shuts upstreams down in parallel. Before
+// touching upstreams it closes the shutdown channel so connected SSE
+// subscribers can emit a goodbye notification — this gives the stdio
+// bridge a chance to exit cleanly, which in turn lets the MCP client
+// (Claude Code, Cursor, etc.) detect "server is gone" instead of
+// silently retaining its connection until the next failed request.
 func (e *Engine) Stop(timeout time.Duration) {
+	e.shutdownMu.Lock()
+	select {
+	case <-e.shutdownCh:
+		// already signalled
+	default:
+		close(e.shutdownCh)
+	}
+	e.shutdownMu.Unlock()
+
+	// Give SSE handlers a brief window to push the goodbye event and
+	// flush their buffers before we cancel watchers / kill upstreams.
+	time.Sleep(150 * time.Millisecond)
+
 	e.mu.Lock()
 	cancels := e.cancels
 	upstreams := e.upstreams
@@ -132,6 +176,13 @@ func (e *Engine) Stop(timeout time.Duration) {
 		}()
 	}
 	wg.Wait()
+}
+
+// ShuttingDown returns a channel that closes when Stop() is invoked.
+// SSE handlers select on it so they can emit a final notification before
+// the daemon tears down upstreams.
+func (e *Engine) ShuttingDown() <-chan struct{} {
+	return e.shutdownCh
 }
 
 // HandleInitialize composes the response Aeolus returns for a client's
@@ -273,23 +324,66 @@ func (e *Engine) toolCount() int {
 	return len(e.toolMap)
 }
 
-func (e *Engine) initUpstreams(ctx context.Context, upstreams []upstream.Server) error {
+// FailedUpstreams returns the names of upstreams that couldn't be
+// initialized or refreshed, along with the error message. Safe to call
+// concurrently with Reload — the caller gets a snapshot.
+func (e *Engine) FailedUpstreams() []UpstreamFailure {
+	e.failuresMu.RLock()
+	defer e.failuresMu.RUnlock()
+	out := make([]UpstreamFailure, 0, len(e.failures))
+	for name, msg := range e.failures {
+		out = append(out, UpstreamFailure{Name: name, Error: msg})
+	}
+	return out
+}
+
+func (e *Engine) failureCount() int {
+	e.failuresMu.RLock()
+	defer e.failuresMu.RUnlock()
+	return len(e.failures)
+}
+
+// initUpstreams runs the MCP initialize handshake against each
+// configured upstream and partitions them into success / failure sets.
+// Failed upstreams are shut down (best effort) so their transports
+// don't leak; their error message is stashed on e.failures for the
+// dashboard to surface. Successful upstreams are returned in input
+// order so namespacing is stable across restarts.
+func (e *Engine) initUpstreams(ctx context.Context, upstreams []upstream.Server) []upstream.Server {
 	clientInfo := mcp.Info{Name: proxyName, Version: proxyVersion}
+	working := make([]upstream.Server, 0, len(upstreams))
+	failures := make(map[string]string)
+
 	for _, u := range upstreams {
 		result, err := u.Initialize(ctx, clientInfo)
 		if err != nil {
-			return fmt.Errorf("initialize %s: %w", u.Name(), err)
+			e.log.Error("upstream_init_failed",
+				"upstream", u.Name(),
+				"error", err.Error(),
+			)
+			failures[u.Name()] = err.Error()
+			go u.Shutdown(2 * time.Second)
+			continue
 		}
 		e.log.Info("upstream_initialized",
 			"name", u.Name(),
 			"server", result.ServerInfo.Name,
 			"protocol", result.ProtocolVersion,
 		)
+		working = append(working, u)
 	}
-	return nil
+
+	e.failuresMu.Lock()
+	e.failures = failures
+	e.failuresMu.Unlock()
+	return working
 }
 
-func (e *Engine) refreshTools(ctx context.Context) error {
+// refreshTools rebuilds the aggregated tool map across all working
+// upstreams. Per-upstream fetch failures are logged + recorded on
+// e.failures but don't poison the whole refresh — tools from healthy
+// upstreams stay available.
+func (e *Engine) refreshTools(ctx context.Context) {
 	e.mu.RLock()
 	upstreams := append([]upstream.Server(nil), e.upstreams...)
 	e.mu.RUnlock()
@@ -297,13 +391,25 @@ func (e *Engine) refreshTools(ctx context.Context) error {
 	next := make(map[string]toolEntry)
 	for _, u := range upstreams {
 		if err := fetchTools(ctx, u, next); err != nil {
-			return err
+			e.log.Error("tools_fetch_failed",
+				"upstream", u.Name(),
+				"error", err.Error(),
+			)
+			e.recordFailure(u.Name(), err.Error())
 		}
 	}
 	e.toolMu.Lock()
 	e.toolMap = next
 	e.toolMu.Unlock()
-	return nil
+}
+
+func (e *Engine) recordFailure(name, errMsg string) {
+	e.failuresMu.Lock()
+	if e.failures == nil {
+		e.failures = make(map[string]string)
+	}
+	e.failures[name] = errMsg
+	e.failuresMu.Unlock()
 }
 
 func (e *Engine) refreshUpstream(ctx context.Context, u upstream.Server) error {

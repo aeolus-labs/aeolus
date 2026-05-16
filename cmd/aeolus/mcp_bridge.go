@@ -159,6 +159,11 @@ func runSSE(ctx context.Context, client *http.Client, daemonURL, sessID string, 
 // streamSSE opens GET /mcp and parses the daemon's SSE event stream,
 // writing each `data:` payload to stdout via writeOut. Returns when the
 // stream ends or the context is cancelled.
+//
+// If the daemon emits the `notifications/aeolus/shutdown` notification,
+// the bridge calls os.Exit(0) — that closes stdio to the parent MCP
+// client (Claude Code, Cursor, etc.) so the client immediately marks
+// the server as disconnected instead of holding a stale connection.
 func streamSSE(ctx context.Context, client *http.Client, daemonURL, sessID string, writeOut func([]byte) error) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, daemonURL, nil)
 	if err != nil {
@@ -189,6 +194,11 @@ func streamSSE(ctx context.Context, client *http.Client, daemonURL, sessID strin
 		if payload == "" {
 			return
 		}
+		if isShutdownNotification([]byte(payload)) {
+			// Daemon is going away. Exit cleanly so stdio closes and
+			// our parent MCP client immediately knows we're gone.
+			os.Exit(0)
+		}
 		if err := writeOut([]byte(payload)); err != nil {
 			fmt.Fprintln(os.Stderr, "aeolus mcp: write notification:", err)
 		}
@@ -209,6 +219,18 @@ func streamSSE(ctx context.Context, client *http.Client, daemonURL, sessID strin
 		}
 	}
 	return scanner.Err()
+}
+
+// isShutdownNotification returns true if the SSE payload is the
+// daemon's notifications/aeolus/shutdown signal.
+func isShutdownNotification(payload []byte) bool {
+	var probe struct {
+		Method string `json:"method"`
+	}
+	if err := json.Unmarshal(payload, &probe); err != nil {
+		return false
+	}
+	return probe.Method == "notifications/aeolus/shutdown"
 }
 
 // readNDJSONLine reads one JSON object terminated by '\n' from r.

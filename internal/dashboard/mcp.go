@@ -135,6 +135,7 @@ func (s *Server) handleMCPGet(w http.ResponseWriter, r *http.Request) {
 
 	sub, unsub := s.engine.SubscribeToolsChanged()
 	defer unsub()
+	shutdown := s.engine.ShuttingDown()
 
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
@@ -142,6 +143,14 @@ func (s *Server) handleMCPGet(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-shutdown:
+			// Daemon is going away. Tell the client so the stdio bridge
+			// can exit cleanly and the MCP client sees "disconnected"
+			// instead of staying in a stale connected state.
+			msg := mcp.Message{JSONRPC: "2.0", Method: mcp.MethodAeolusShutdown}
+			_ = writeSSE(w, msg)
+			flusher.Flush()
 			return
 		case _, open := <-sub:
 			if !open {

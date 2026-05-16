@@ -69,6 +69,7 @@ type McpEngine interface {
 	ListTools() []mcp.Tool
 	CallTool(ctx context.Context, name string, arguments json.RawMessage) *mcp.Message
 	SubscribeToolsChanged() (<-chan struct{}, func())
+	ShuttingDown() <-chan struct{}
 }
 
 // mcpSession holds per-MCP-client state. Currently minimal; sessions

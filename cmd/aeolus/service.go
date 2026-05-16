@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // macOS-only for now. Linux systemd / Windows service variants are
@@ -83,6 +85,7 @@ func plistContent() string {
 	exe := findSelfPath()
 	cfg := defaultConfigPath()
 	log := logPath()
+	path := resolveLaunchdPath()
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -111,11 +114,47 @@ func plistContent() string {
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <string>%s</string>
     </dict>
 </dict>
 </plist>
-`, launchAgentLabel, exe, cfg, log, log)
+`, launchAgentLabel, exe, cfg, log, log, path)
+}
+
+// resolveLaunchdPath returns a PATH suitable for embedding in the
+// launchd plist. launchd-spawned processes inherit only a minimal
+// environment, so common Node/Python managers (nvm, fnm, Volta, pyenv,
+// asdf) installed via the user's shell rc files are invisible. We
+// resolve PATH by launching the user's interactive login shell once at
+// `service install` time and capturing what it exports — same trick
+// VS Code and other Mac GUI apps use. The fallback list is the
+// pre-fix behavior in case the shell probe fails or returns garbage.
+func resolveLaunchdPath() string {
+	const fallback = "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"
+
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/zsh"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, shell, "-ilc", `printf '%s' "$PATH"`)
+	out, err := cmd.Output()
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"service install: couldn't read your shell's PATH (%v); falling back to the minimal default.\n", err)
+		return fallback
+	}
+
+	path := strings.TrimSpace(string(out))
+	if path == "" || strings.ContainsAny(path, "\n\r<>&'\"") {
+		fmt.Fprintln(os.Stderr,
+			"service install: shell returned an unusable PATH; falling back to the minimal default.")
+		return fallback
+	}
+	return path
 }
 
 func installService(args []string) {

@@ -36,6 +36,12 @@ const (
 	MethodToolsCall        = "tools/call"
 	MethodToolsListChanged = "notifications/tools/list_changed"
 
+	// MethodAeolusShutdown is a non-standard notification the daemon
+	// emits over its outbound SSE stream right before it stops, so the
+	// stdio bridge can exit cleanly instead of leaving its parent MCP
+	// client in a "still connected" state. The MCP spec has no equivalent.
+	MethodAeolusShutdown = "notifications/aeolus/shutdown"
+
 	ProtocolVersion = "2024-11-05"
 )
 
