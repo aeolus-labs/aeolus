@@ -328,6 +328,9 @@ function EnvEditor({
           />
           <input
             className="text-input mono env-value"
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
             value={e.value}
             placeholder="value"
             onChange={(ev) => {

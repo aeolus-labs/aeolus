@@ -233,6 +233,11 @@ type statsResponse struct {
 	Errors    int      `json:"errors"`
 }
 
+// secretMask is the wire-sentinel returned in GET /api/config for env
+// values. On PUT, any env value equal to secretMask is replaced with the
+// previously-stored value, so editing a masked field preserves the secret.
+const secretMask = "***"
+
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -240,11 +245,71 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		cfg := s.cfg
 		s.cfgMu.RUnlock()
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(cfg)
+		_ = json.NewEncoder(w).Encode(maskedConfig(cfg))
 	case http.MethodPut:
 		s.handleConfigPut(w, r)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// maskedConfig returns a copy of cfg with all env values replaced by
+// secretMask, leaving keys intact. The original cfg is not mutated.
+func maskedConfig(cfg *config.Config) *config.Config {
+	if cfg == nil {
+		return nil
+	}
+	out := *cfg
+	out.Upstreams = make([]config.Upstream, len(cfg.Upstreams))
+	for i, u := range cfg.Upstreams {
+		c := u
+		if len(u.Env) > 0 {
+			c.Env = make([]string, len(u.Env))
+			for j, e := range u.Env {
+				if eq := strings.Index(e, "="); eq >= 0 {
+					c.Env[j] = e[:eq+1] + secretMask
+				} else {
+					c.Env[j] = e
+				}
+			}
+		}
+		out.Upstreams[i] = c
+	}
+	return &out
+}
+
+// preserveMaskedEnv restores env values in newCfg from oldCfg whenever the
+// new value is the wire sentinel. Match is by upstream name + env key.
+func preserveMaskedEnv(newCfg, oldCfg *config.Config) {
+	if oldCfg == nil {
+		return
+	}
+	oldByName := make(map[string]map[string]string, len(oldCfg.Upstreams))
+	for _, u := range oldCfg.Upstreams {
+		kv := make(map[string]string, len(u.Env))
+		for _, e := range u.Env {
+			if eq := strings.Index(e, "="); eq >= 0 {
+				kv[e[:eq]] = e[eq+1:]
+			}
+		}
+		oldByName[u.Name] = kv
+	}
+	for i, u := range newCfg.Upstreams {
+		oldEnv, ok := oldByName[u.Name]
+		if !ok {
+			continue
+		}
+		for j, e := range u.Env {
+			eq := strings.Index(e, "=")
+			if eq < 0 {
+				continue
+			}
+			if e[eq+1:] == secretMask {
+				if real, ok := oldEnv[e[:eq]]; ok {
+					newCfg.Upstreams[i].Env[j] = e[:eq+1] + real
+				}
+			}
+		}
 	}
 }
 
@@ -263,6 +328,12 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Merge in any preserved secrets before validating: masked env values in
+	// the request body get filled from the current in-memory config.
+	s.cfgMu.RLock()
+	currentCfg := s.cfg
+	s.cfgMu.RUnlock()
+	preserveMaskedEnv(&newCfg, currentCfg)
 	if err := config.Validate(&newCfg); err != nil {
 		http.Error(w, "invalid config: "+err.Error(), http.StatusBadRequest)
 		return
