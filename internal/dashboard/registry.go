@@ -35,6 +35,10 @@ type CatalogEntry struct {
 	URL     string            `json:"url,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"`
 
+	// External links surfaced from the registry.
+	Repository string `json:"repository,omitempty"` // GitHub or other source
+	Website    string `json:"website,omitempty"`    // product / docs site
+
 	Notes string `json:"notes,omitempty"`
 }
 
@@ -89,8 +93,9 @@ type registryEnvVar struct {
 }
 
 type registryRemote struct {
-	Type string `json:"type"`
-	URL  string `json:"url"`
+	Type    string           `json:"type"`
+	URL     string           `json:"url"`
+	Headers []registryEnvVar `json:"headers,omitempty"`
 }
 
 // fetchRegistry walks the MCP registry pagination and returns a CatalogEntry
@@ -203,12 +208,30 @@ func mapEntry(s registryServer) (CatalogEntry, bool) {
 	if !ok {
 		for _, r := range s.Remotes {
 			if r.Type == "streamable-http" && r.URL != "" {
+				headers := map[string]string{}
+				for _, h := range r.Headers {
+					headers[h.Name] = "{{" + h.Name + "}}"
+				}
+				notes := ""
+				var required []string
+				for _, h := range r.Headers {
+					if h.IsRequired {
+						required = append(required, h.Name)
+					}
+				}
+				if len(required) > 0 {
+					notes = "Required headers: " + strings.Join(required, ", ")
+				}
 				return CatalogEntry{
 					ID:          s.Name,
 					Name:        displayName(s),
 					Description: s.Description,
 					Transport:   "http",
 					URL:         r.URL,
+					Headers:     headers,
+					Repository:  repoURL(s),
+					Website:     s.WebsiteURL,
+					Notes:       notes,
 				}, true
 			}
 		}
@@ -248,8 +271,17 @@ func mapEntry(s registryServer) (CatalogEntry, bool) {
 		Command:     "npx",
 		Args:        []string{"-y", identifier},
 		Env:         env,
+		Repository:  repoURL(s),
+		Website:     s.WebsiteURL,
 		Notes:       notes,
 	}, true
+}
+
+func repoURL(s registryServer) string {
+	if s.Repository == nil {
+		return ""
+	}
+	return s.Repository.URL
 }
 
 func pickPackage(pkgs []registryPackage) (registryPackage, bool) {

@@ -1,5 +1,6 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import type { AeolusConfig, CatalogEntry, Upstream } from './types'
+import { applyCatalogFilters, type CatalogFilters } from './catalogFilters'
 
 type Source = 'catalog' | 'custom'
 
@@ -8,16 +9,19 @@ type ProbedTool = { name: string; description?: string }
 type Props = {
   config: AeolusConfig
   catalog: CatalogEntry[]
-  editing?: Upstream // when present, modal opens in edit mode pre-filled
+  editing?: Upstream // edit mode: pre-fill from existing upstream
+  prefill?: CatalogEntry // open with this catalog entry pre-applied
   onClose: () => void
   onSaved: (next: AeolusConfig) => void
 }
 
-export default function AddUpstream({ config, catalog, editing, onClose, onSaved }: Props) {
+export default function AddUpstream({ config, catalog, editing, prefill, onClose, onSaved }: Props) {
   const isEdit = !!editing
 
-  const [source, setSource] = useState<Source>('catalog')
-  const [step, setStep] = useState<'pick' | 'probe' | 'tools'>(isEdit ? 'probe' : 'pick')
+  const [source, setSource] = useState<Source>(prefill ? 'custom' : 'catalog')
+  const [step, setStep] = useState<'pick' | 'probe' | 'tools'>(
+    isEdit || prefill ? 'probe' : 'pick'
+  )
 
   const [name, setName] = useState(editing?.name ?? '')
   const [transport, setTransport] = useState<'stdio' | 'http'>(
@@ -29,6 +33,11 @@ export default function AddUpstream({ config, catalog, editing, onClose, onSaved
   const [url, setUrl] = useState(editing?.url ?? '')
   const [headerEntries, setHeaderEntries] = useState<EnvRow[]>(parseHeaders(editing?.headers))
   const [catalogSearch, setCatalogSearch] = useState('')
+  const [catalogFilters, setCatalogFilters] = useState<CatalogFilters>({
+    transport: 'all',
+    auth: 'all',
+    source: 'all',
+  })
 
   const [probedTools, setProbedTools] = useState<ProbedTool[] | null>(null)
   const [selectedTools, setSelectedTools] = useState<Set<string>>(new Set())
@@ -37,17 +46,19 @@ export default function AddUpstream({ config, catalog, editing, onClose, onSaved
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const filteredCatalog = useMemo(() => {
-    const q = catalogSearch.toLowerCase().trim()
-    if (!q) return catalog.slice(0, 40)
-    return catalog
-      .filter((e) =>
-        e.name.toLowerCase().includes(q) ||
-        e.description.toLowerCase().includes(q) ||
-        e.id.toLowerCase().includes(q)
-      )
-      .slice(0, 40)
-  }, [catalog, catalogSearch])
+  const filteredCatalog = useMemo(
+    () => applyCatalogFilters(catalog, catalogSearch, catalogFilters).slice(0, 40),
+    [catalog, catalogSearch, catalogFilters]
+  )
+
+  // If we opened with a catalog prefill, apply it once on mount. Safe because
+  // applyCatalog only touches state setters and is idempotent for the same entry.
+  useEffect(() => {
+    if (prefill) {
+      applyCatalog(prefill)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   function applyCatalog(entry: CatalogEntry) {
     const slug = lastSegment(entry.id) || entry.name
@@ -217,6 +228,8 @@ export default function AddUpstream({ config, catalog, editing, onClose, onSaved
             catalog={filteredCatalog}
             search={catalogSearch}
             onSearch={setCatalogSearch}
+            filters={catalogFilters}
+            onFilters={setCatalogFilters}
             onPick={applyCatalog}
           />
         )}
@@ -289,6 +302,8 @@ function CatalogStep(props: {
   catalog: CatalogEntry[]
   search: string
   onSearch: (s: string) => void
+  filters: CatalogFilters
+  onFilters: (f: CatalogFilters) => void
   onPick: (e: CatalogEntry) => void
 }) {
   return (
@@ -301,6 +316,7 @@ function CatalogStep(props: {
         onChange={(e) => props.onSearch(e.target.value)}
         autoFocus
       />
+      <ModalCatalogFilterBar filters={props.filters} onChange={props.onFilters} />
       <div className="catalog-list">
         {props.catalog.map((e) => (
           <button key={e.id} className="catalog-pick" onClick={() => props.onPick(e)}>
@@ -309,6 +325,34 @@ function CatalogStep(props: {
             <div className="catalog-pick-id mono">{e.id}</div>
           </button>
         ))}
+      </div>
+    </div>
+  )
+}
+
+function ModalCatalogFilterBar({
+  filters,
+  onChange,
+}: {
+  filters: CatalogFilters
+  onChange: (f: CatalogFilters) => void
+}) {
+  return (
+    <div className="catalog-filters">
+      <div className="segmented filter-segmented">
+        <button type="button" className={`segment ${filters.transport === 'all' ? 'segment-active' : ''}`} onClick={() => onChange({ ...filters, transport: 'all' })}>All</button>
+        <button type="button" className={`segment ${filters.transport === 'stdio' ? 'segment-active' : ''}`} onClick={() => onChange({ ...filters, transport: 'stdio' })}>stdio</button>
+        <button type="button" className={`segment ${filters.transport === 'http' ? 'segment-active' : ''}`} onClick={() => onChange({ ...filters, transport: 'http' })}>http</button>
+      </div>
+      <div className="segmented filter-segmented">
+        <button type="button" className={`segment ${filters.auth === 'all' ? 'segment-active' : ''}`} onClick={() => onChange({ ...filters, auth: 'all' })}>Any auth</button>
+        <button type="button" className={`segment ${filters.auth === 'none' ? 'segment-active' : ''}`} onClick={() => onChange({ ...filters, auth: 'none' })}>No auth</button>
+        <button type="button" className={`segment ${filters.auth === 'required' ? 'segment-active' : ''}`} onClick={() => onChange({ ...filters, auth: 'required' })}>Auth req.</button>
+      </div>
+      <div className="segmented filter-segmented">
+        <button type="button" className={`segment ${filters.source === 'all' ? 'segment-active' : ''}`} onClick={() => onChange({ ...filters, source: 'all' })}>All</button>
+        <button type="button" className={`segment ${filters.source === 'official' ? 'segment-active' : ''}`} onClick={() => onChange({ ...filters, source: 'official' })}>Official</button>
+        <button type="button" className={`segment ${filters.source === 'community' ? 'segment-active' : ''}`} onClick={() => onChange({ ...filters, source: 'community' })}>Community</button>
       </div>
     </div>
   )

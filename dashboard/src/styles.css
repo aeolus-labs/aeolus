@@ -449,6 +449,26 @@ body {
   gap: 12px;
 }
 
+.catalog-grid {
+  max-height: calc(100vh - 320px);
+  overflow-y: auto;
+  padding: 4px 4px 12px 0;
+  margin-top: 4px;
+}
+
+.catalog-grid::-webkit-scrollbar {
+  width: 10px;
+}
+
+.catalog-grid::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 6px;
+}
+
+.catalog-grid::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
 .card {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
@@ -457,6 +477,32 @@ body {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-height: 180px;
+}
+
+.card-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  min-height: 0;
+}
+
+.catalog-grid .card-description {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.catalog-grid .card-notes {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .card-header {
@@ -478,16 +524,60 @@ body {
   border-color: rgba(255, 184, 0, 0.3);
 }
 
-.card-body {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 12px;
+.card-footer-slot {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
 }
 
 .card-description {
   margin: 0;
   color: var(--text);
+}
+
+.catalog-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+  margin: 12px 0;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.filter-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.filter-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.filter-segmented .segment {
+  font-size: 11px;
+  padding: 4px 10px;
+}
+
+.card-links {
+  display: flex;
+  gap: 10px;
+  font-size: 11px;
+  margin-top: auto;
+  padding-top: 6px;
+}
+
+.card-links a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.card-links a:hover {
+  text-decoration: underline;
 }
 
 .card-notes {

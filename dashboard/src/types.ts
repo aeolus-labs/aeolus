@@ -56,5 +56,7 @@ export type CatalogEntry = {
   env?: Record<string, string>
   url?: string
   headers?: Record<string, string>
+  repository?: string
+  website?: string
   notes?: string
 }

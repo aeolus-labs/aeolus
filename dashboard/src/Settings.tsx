@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { api } from './api'
 import type { AeolusConfig, CatalogEntry, Upstream } from './types'
 import AddUpstream from './AddUpstream'
+import { applyCatalogFilters, type CatalogFilters } from './catalogFilters'
 
 const CATALOG_DISPLAY_LIMIT = 60
 
@@ -15,10 +16,17 @@ export default function Settings() {
   const [catalog, setCatalog] = useState<CatalogEntry[]>([])
   const [catalogLoading, setCatalogLoading] = useState(true)
   const [catalogSearch, setCatalogSearch] = useState('')
+  const [catalogFilters, setCatalogFilters] = useState<CatalogFilters>({
+    transport: 'all',
+    auth: 'all',
+    source: 'all',
+  })
   const [error, setError] = useState<string | null>(null)
   const [showAdd, setShowAdd] = useState(false)
   const [editing, setEditing] = useState<Upstream | null>(null)
+  const [prefill, setPrefill] = useState<CatalogEntry | null>(null)
   const [removing, setRemoving] = useState<string | null>(null)
+  const [settingsTab, setSettingsTab] = useState<'upstreams' | 'catalog'>('upstreams')
 
   useEffect(() => {
     api.config().then(setConfig).catch((err) => setError(err.message))
@@ -47,15 +55,10 @@ export default function Settings() {
     return () => es.close()
   }, [])
 
-  const filteredCatalog = useMemo(() => {
-    const q = catalogSearch.toLowerCase().trim()
-    if (!q) return catalog
-    return catalog.filter((e) =>
-      e.name.toLowerCase().includes(q) ||
-      e.description.toLowerCase().includes(q) ||
-      e.id.toLowerCase().includes(q)
-    )
-  }, [catalog, catalogSearch])
+  const filteredCatalog = useMemo(
+    () => applyCatalogFilters(catalog, catalogSearch, catalogFilters),
+    [catalog, catalogSearch, catalogFilters]
+  )
 
   const visibleCatalog = filteredCatalog.slice(0, CATALOG_DISPLAY_LIMIT)
   const hiddenCount = filteredCatalog.length - visibleCatalog.length
@@ -102,75 +105,109 @@ export default function Settings() {
 
   return (
     <div className="settings">
-      <section className="settings-section">
-        <div className="settings-section-header">
-          <h2>Connected upstreams</h2>
-          <button className="btn-primary" onClick={() => setShowAdd(true)}>
-            + Add upstream
-          </button>
-        </div>
-        {(config.upstreams ?? []).length === 0 ? (
-          <div className="empty">No upstreams configured.</div>
-        ) : (
-          <div className="upstream-grid">
-            {config.upstreams.map((u) => (
-              <UpstreamCard
-                key={u.name}
-                upstream={u}
-                allowList={allowList}
-                denyList={denyList}
-                onEdit={() => setEditing(u)}
-                onRemove={() => removeUpstream(u)}
-                removing={removing === u.name}
+      <nav className="subtabs">
+        <button
+          className={`subtab ${settingsTab === 'upstreams' ? 'subtab-active' : ''}`}
+          onClick={() => setSettingsTab('upstreams')}
+        >
+          Upstreams ({config.upstreams.length})
+        </button>
+        <button
+          className={`subtab ${settingsTab === 'catalog' ? 'subtab-active' : ''}`}
+          onClick={() => setSettingsTab('catalog')}
+        >
+          Catalog ({catalog.length}{catalogLoading ? '+' : ''})
+        </button>
+      </nav>
+
+      {settingsTab === 'upstreams' && (
+        <section className="settings-section">
+          <div className="settings-section-header">
+            <h2>Connected upstreams</h2>
+            <button className="btn-primary" onClick={() => setShowAdd(true)}>
+              + Add upstream
+            </button>
+          </div>
+          {(config.upstreams ?? []).length === 0 ? (
+            <div className="empty">
+              No upstreams configured. Add one from the{' '}
+              <button className="link" onClick={() => setSettingsTab('catalog')}>Catalog</button>
+              {' '}or click "+ Add upstream" to enter a custom command.
+            </div>
+          ) : (
+            <div className="upstream-grid">
+              {config.upstreams.map((u) => (
+                <UpstreamCard
+                  key={u.name}
+                  upstream={u}
+                  allowList={allowList}
+                  denyList={denyList}
+                  onEdit={() => setEditing(u)}
+                  onRemove={() => removeUpstream(u)}
+                  removing={removing === u.name}
+                />
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
+      {settingsTab === 'catalog' && (
+        <section className="settings-section">
+          <div className="settings-section-header">
+            <h2>Catalog</h2>
+            <span className="settings-help">
+              {catalog.length} servers from the MCP registry
+              {catalogLoading && <span className="catalog-loading"> · loading more…</span>}
+            </span>
+          </div>
+          <input
+            type="search"
+            className="search"
+            placeholder="Search catalog by name, description, or id..."
+            value={catalogSearch}
+            onChange={(e) => setCatalogSearch(e.target.value)}
+          />
+          <CatalogFilterBar filters={catalogFilters} onChange={setCatalogFilters} />
+          <div className="catalog-grid">
+            {visibleCatalog.map((e) => (
+              <CatalogCard
+                key={e.id}
+                entry={e}
+                onAdd={() => {
+                  setPrefill(e)
+                  setShowAdd(true)
+                }}
               />
             ))}
           </div>
-        )}
-      </section>
-
-      <section className="settings-section">
-        <div className="settings-section-header">
-          <h2>Catalog</h2>
-          <span className="settings-help">
-            {catalog.length} servers from the MCP registry
-            {catalogLoading && <span className="catalog-loading"> · loading more…</span>}
-          </span>
-        </div>
-        <input
-          type="search"
-          className="search"
-          placeholder="Search catalog by name, description, or id..."
-          value={catalogSearch}
-          onChange={(e) => setCatalogSearch(e.target.value)}
-        />
-        <div className="catalog-grid">
-          {visibleCatalog.map((e) => (
-            <CatalogCard key={e.id} entry={e} />
-          ))}
-        </div>
-        {hiddenCount > 0 && (
-          <div className="settings-help">
-            {hiddenCount} more match{hiddenCount === 1 ? 'es' : ''} — refine the search to narrow down.
-          </div>
-        )}
-        {filteredCatalog.length === 0 && (
-          <div className="empty">No catalog entries match your search.</div>
-        )}
-      </section>
+          {hiddenCount > 0 && (
+            <div className="settings-help">
+              {hiddenCount} more match{hiddenCount === 1 ? 'es' : ''} — refine the search to narrow down.
+            </div>
+          )}
+          {filteredCatalog.length === 0 && (
+            <div className="empty">No catalog entries match your search.</div>
+          )}
+        </section>
+      )}
 
       {(showAdd || editing) && config && (
         <AddUpstream
           config={config}
           catalog={catalog}
           editing={editing ?? undefined}
+          prefill={prefill ?? undefined}
           onClose={() => {
             setShowAdd(false)
             setEditing(null)
+            setPrefill(null)
           }}
           onSaved={(next) => {
             setConfig(next)
             setShowAdd(false)
             setEditing(null)
+            setPrefill(null)
           }}
         />
       )}
@@ -280,22 +317,81 @@ function stripPrefix(rules: string[], prefix: string): string[] {
   return rules.map((r) => (r.startsWith(prefix) ? r.slice(prefix.length) : r))
 }
 
-function CatalogCard({ entry }: { entry: CatalogEntry }) {
-  const needsEnv = entry.env && Object.keys(entry.env).length > 0
+function CatalogFilterBar({
+  filters,
+  onChange,
+}: {
+  filters: CatalogFilters
+  onChange: (f: CatalogFilters) => void
+}) {
+  return (
+    <div className="catalog-filters">
+      <FilterGroup label="Transport">
+        <FilterOption active={filters.transport === 'all'} onClick={() => onChange({ ...filters, transport: 'all' })}>All</FilterOption>
+        <FilterOption active={filters.transport === 'stdio'} onClick={() => onChange({ ...filters, transport: 'stdio' })}>stdio</FilterOption>
+        <FilterOption active={filters.transport === 'http'} onClick={() => onChange({ ...filters, transport: 'http' })}>http</FilterOption>
+      </FilterGroup>
+      <FilterGroup label="Auth">
+        <FilterOption active={filters.auth === 'all'} onClick={() => onChange({ ...filters, auth: 'all' })}>All</FilterOption>
+        <FilterOption active={filters.auth === 'none'} onClick={() => onChange({ ...filters, auth: 'none' })}>No auth</FilterOption>
+        <FilterOption active={filters.auth === 'required'} onClick={() => onChange({ ...filters, auth: 'required' })}>Auth required</FilterOption>
+      </FilterGroup>
+      <FilterGroup label="Source">
+        <FilterOption active={filters.source === 'all'} onClick={() => onChange({ ...filters, source: 'all' })}>All</FilterOption>
+        <FilterOption active={filters.source === 'official'} onClick={() => onChange({ ...filters, source: 'official' })}>Official</FilterOption>
+        <FilterOption active={filters.source === 'community'} onClick={() => onChange({ ...filters, source: 'community' })}>Community</FilterOption>
+      </FilterGroup>
+    </div>
+  )
+}
+
+function FilterGroup({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="filter-group">
+      <span className="filter-label">{label}</span>
+      <div className="segmented filter-segmented">{children}</div>
+    </div>
+  )
+}
+
+function FilterOption({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button type="button" className={`segment ${active ? 'segment-active' : ''}`} onClick={onClick}>
+      {children}
+    </button>
+  )
+}
+
+function CatalogCard({ entry, onAdd }: { entry: CatalogEntry; onAdd: () => void }) {
+  const needsAuth =
+    (entry.env && Object.keys(entry.env).length > 0) ||
+    (entry.headers && Object.keys(entry.headers).length > 0)
+  const transport = entry.transport === 'http' ? 'http' : 'stdio'
   return (
     <div className="card">
       <div className="card-header">
         <span className="card-title">{entry.name}</span>
-        {needsEnv && <span className="badge badge-warn">needs auth</span>}
+        <span className="badge">{transport}</span>
       </div>
       <div className="card-body">
         <p className="card-description">{entry.description}</p>
         {entry.notes && <p className="card-notes">{entry.notes}</p>}
+        {(entry.repository || entry.website) && (
+          <div className="card-links">
+            {entry.repository && (
+              <a href={entry.repository} target="_blank" rel="noopener noreferrer">Repo ↗</a>
+            )}
+            {entry.website && (
+              <a href={entry.website} target="_blank" rel="noopener noreferrer">Docs ↗</a>
+            )}
+          </div>
+        )}
       </div>
-      <div className="card-footer">
-        <button className="btn-secondary" disabled title="Coming next commit">
-          Add
-        </button>
+      <div className="card-footer card-footer-spaced">
+        <span className="card-footer-slot">
+          {needsAuth && <span className="badge badge-warn">needs auth</span>}
+        </span>
+        <button className="btn-primary" onClick={onAdd}>Add</button>
       </div>
     </div>
   )
