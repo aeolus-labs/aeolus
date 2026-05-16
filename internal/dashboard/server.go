@@ -387,9 +387,12 @@ func atomicWriteFile(path string, data []byte) error {
 }
 
 type probeRequest struct {
-	Command string            `json:"command"`
-	Args    []string          `json:"args"`
-	Env     map[string]string `json:"env"`
+	Transport string            `json:"transport,omitempty"`
+	Command   string            `json:"command,omitempty"`
+	Args      []string          `json:"args,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	URL       string            `json:"url,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"`
 }
 
 func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
@@ -402,8 +405,23 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if req.Command == "" {
-		http.Error(w, "command is required", http.StatusBadRequest)
+	transport := req.Transport
+	if transport == "" {
+		transport = "stdio"
+	}
+	switch transport {
+	case "stdio":
+		if req.Command == "" {
+			http.Error(w, "command is required for stdio probe", http.StatusBadRequest)
+			return
+		}
+	case "http":
+		if req.URL == "" {
+			http.Error(w, "url is required for http probe", http.StatusBadRequest)
+			return
+		}
+	default:
+		http.Error(w, "unknown transport "+transport, http.StatusBadRequest)
 		return
 	}
 
@@ -415,15 +433,25 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 		envSlice = append(envSlice, k+"="+v)
 	}
 
-	u, err := upstream.Start(ctx, "probe", req.Command, req.Args, envSlice, s.log)
+	cfg := config.Upstream{
+		Name:      "probe",
+		Transport: transport,
+		Command:   req.Command,
+		Args:      req.Args,
+		Env:       envSlice,
+		URL:       req.URL,
+		Headers:   req.Headers,
+	}
+	u, err := upstream.New(ctx, cfg, s.log)
 	if err != nil {
 		http.Error(w, "spawn failed: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	defer u.Shutdown(2 * time.Second)
 
-	// Capture upstream stderr so error responses can include the underlying
-	// reason (missing path arg, missing token, npm install failure, etc.).
+	// Capture stdio upstream stderr so error responses can include the
+	// underlying reason. HTTP upstreams return nil here; their errors come
+	// back as HTTP response bodies inside the Initialize/Request paths.
 	stderrBuf := &captureBuf{}
 	if r := u.Stderr(); r != nil {
 		go func() { _, _ = io.Copy(stderrBuf, r) }()

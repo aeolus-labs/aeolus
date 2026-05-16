@@ -21,10 +21,17 @@ type Dashboard struct {
 }
 
 type Upstream struct {
-	Name    string   `yaml:"name" json:"name"`
-	Command string   `yaml:"command" json:"command"`
-	Args    []string `yaml:"args" json:"args"`
+	Name      string `yaml:"name" json:"name"`
+	Transport string `yaml:"transport,omitempty" json:"transport,omitempty"` // "stdio" (default) or "http"
+
+	// stdio transport fields
+	Command string   `yaml:"command,omitempty" json:"command,omitempty"`
+	Args    []string `yaml:"args,omitempty" json:"args,omitempty"`
 	Env     []string `yaml:"env,omitempty" json:"env,omitempty"`
+
+	// http transport fields
+	URL     string            `yaml:"url,omitempty" json:"url,omitempty"`
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
 }
 
 type Tools struct {
@@ -69,8 +76,22 @@ func (c *Config) validate() error {
 			return fmt.Errorf("upstreams[%d]: duplicate name %q", i, u.Name)
 		}
 		seen[u.Name] = true
-		if u.Command == "" {
-			return fmt.Errorf("upstreams[%d] (%s): command is required", i, u.Name)
+		transport := u.Transport
+		if transport == "" {
+			transport = "stdio"
+			c.Upstreams[i].Transport = "stdio"
+		}
+		switch transport {
+		case "stdio":
+			if u.Command == "" {
+				return fmt.Errorf("upstreams[%d] (%s): command is required for stdio transport", i, u.Name)
+			}
+		case "http":
+			if u.URL == "" {
+				return fmt.Errorf("upstreams[%d] (%s): url is required for http transport", i, u.Name)
+			}
+		default:
+			return fmt.Errorf("upstreams[%d] (%s): unknown transport %q (expected stdio or http)", i, u.Name, transport)
 		}
 	}
 	if c.Log.Level == "" {

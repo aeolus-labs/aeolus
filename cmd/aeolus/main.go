@@ -171,21 +171,24 @@ func run(configPath string) error {
 	return runErr
 }
 
-// startUpstreams launches each configured upstream and wires stderr
-// forwarding. Caller owns the lifetime; pair with Shutdown on each or call
-// Proxy.Reload to hand them off.
+// startUpstreams launches each configured upstream via the transport-agnostic
+// factory and wires stderr forwarding (no-op for non-subprocess transports).
+// Caller owns the lifetime; pair with Shutdown on each or call Proxy.Reload
+// to hand them off.
 func startUpstreams(ctx context.Context, list []config.Upstream, logger *slog.Logger) ([]upstream.Server, error) {
 	out := make([]upstream.Server, 0, len(list))
 	for _, u := range list {
-		proc, err := upstream.Start(ctx, u.Name, u.Command, u.Args, u.Env, logger)
+		srv, err := upstream.New(ctx, u, logger)
 		if err != nil {
 			for _, started := range out {
 				started.Shutdown(2 * time.Second)
 			}
 			return nil, err
 		}
-		go forwardStderr(u.Name, proc.Stderr())
-		out = append(out, proc)
+		if r := srv.Stderr(); r != nil {
+			go forwardStderr(u.Name, r)
+		}
+		out = append(out, srv)
 	}
 	return out, nil
 }
