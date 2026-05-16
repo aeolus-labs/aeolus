@@ -9,32 +9,32 @@ import (
 )
 
 type Config struct {
-	Upstreams []Upstream `yaml:"upstreams"`
-	Tools     Tools      `yaml:"tools"`
-	Log       Log        `yaml:"log"`
-	Dashboard Dashboard  `yaml:"dashboard"`
+	Upstreams []Upstream `yaml:"upstreams" json:"upstreams"`
+	Tools     Tools      `yaml:"tools" json:"tools"`
+	Log       Log        `yaml:"log" json:"log"`
+	Dashboard Dashboard  `yaml:"dashboard" json:"dashboard"`
 }
 
 type Dashboard struct {
-	Enabled bool   `yaml:"enabled"`
-	Addr    string `yaml:"addr"`
+	Enabled bool   `yaml:"enabled" json:"enabled"`
+	Addr    string `yaml:"addr" json:"addr"`
 }
 
 type Upstream struct {
-	Name    string   `yaml:"name"`
-	Command string   `yaml:"command"`
-	Args    []string `yaml:"args"`
-	Env     []string `yaml:"env,omitempty"`
+	Name    string   `yaml:"name" json:"name"`
+	Command string   `yaml:"command" json:"command"`
+	Args    []string `yaml:"args" json:"args"`
+	Env     []string `yaml:"env,omitempty" json:"env,omitempty"`
 }
 
 type Tools struct {
-	Allow []string `yaml:"allow"`
-	Deny  []string `yaml:"deny"`
+	Allow []string `yaml:"allow" json:"allow"`
+	Deny  []string `yaml:"deny" json:"deny"`
 }
 
 type Log struct {
-	Level  string `yaml:"level"`
-	Format string `yaml:"format"`
+	Level  string `yaml:"level" json:"level"`
+	Format string `yaml:"format" json:"format"`
 }
 
 func Load(path string) (*Config, error) {
@@ -46,11 +46,15 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
-	if err := cfg.validate(); err != nil {
+	if err := Validate(&cfg); err != nil {
 		return nil, fmt.Errorf("invalid config %s: %w", path, err)
 	}
 	return &cfg, nil
 }
+
+// Validate checks the config and fills in defaults. Exported so the dashboard
+// can validate a posted config before persisting it.
+func Validate(c *Config) error { return c.validate() }
 
 func (c *Config) validate() error {
 	if len(c.Upstreams) == 0 {

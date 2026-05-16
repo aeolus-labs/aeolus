@@ -1,10 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ToolCallEvent } from './types'
+import Settings from './Settings'
+
+type View = 'live' | 'settings'
 
 const MAX_EVENTS = 500
 const TOP_STATS = 5
 
 export default function App() {
+  const [view, setView] = useState<View>('live')
   const [events, setEvents] = useState<ToolCallEvent[]>([])
   const [connected, setConnected] = useState(false)
   const [search, setSearch] = useState('')
@@ -51,30 +55,74 @@ export default function App() {
       <header className="header">
         <div className="brand">
           <span className="logo">Aeolus</span>
-          <span className="version">v0.2.2-dev</span>
+          <span className="version">v0.3.0-dev</span>
           <span className={`conn conn-${connected ? 'on' : 'off'}`}>
             {connected ? 'live' : 'disconnected'}
           </span>
         </div>
-        <div className="upstreams">
-          {upstreams.map((u) => (
-            <span key={u} className="badge">{u}</span>
-          ))}
-        </div>
+        <nav className="tabs">
+          <button
+            className={`tab ${view === 'live' ? 'tab-active' : ''}`}
+            onClick={() => setView('live')}
+          >
+            Live
+          </button>
+          <button
+            className={`tab ${view === 'settings' ? 'tab-active' : ''}`}
+            onClick={() => setView('settings')}
+          >
+            Settings
+          </button>
+        </nav>
         <div className="stats">
           <Stat label="calls" value={total} />
           <Stat label="errors" value={errors} tone={errors > 0 ? 'error' : 'normal'} />
         </div>
       </header>
 
+      {view === 'settings' ? (
+        <Settings />
+      ) : (
+        <LiveView
+          events={events}
+          filtered={filtered}
+          stats={stats}
+          upstreams={upstreams}
+          search={search}
+          onSearch={setSearch}
+          upstreamFilter={upstreamFilter}
+          onUpstreamFilter={setUpstreamFilter}
+          statusFilter={statusFilter}
+          onStatusFilter={setStatusFilter}
+        />
+      )}
+    </div>
+  )
+}
+
+function LiveView(props: {
+  events: ToolCallEvent[]
+  filtered: ToolCallEvent[]
+  stats: ToolStats[]
+  upstreams: string[]
+  search: string
+  onSearch: (s: string) => void
+  upstreamFilter: string
+  onUpstreamFilter: (u: string) => void
+  statusFilter: '' | 'ok' | 'error'
+  onStatusFilter: (s: '' | 'ok' | 'error') => void
+}) {
+  const { events, filtered, stats, upstreams } = props
+  return (
+    <>
       <FilterBar
-        search={search}
-        onSearch={setSearch}
-        upstream={upstreamFilter}
-        onUpstream={setUpstreamFilter}
+        search={props.search}
+        onSearch={props.onSearch}
+        upstream={props.upstreamFilter}
+        onUpstream={props.onUpstreamFilter}
         upstreams={upstreams}
-        status={statusFilter}
-        onStatus={setStatusFilter}
+        status={props.statusFilter}
+        onStatus={props.onStatusFilter}
       />
 
       {stats.length > 0 && <StatsStrip stats={stats} />}
@@ -119,7 +167,7 @@ export default function App() {
           )}
         </section>
       </main>
-    </div>
+    </>
   )
 }
 

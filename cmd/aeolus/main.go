@@ -62,21 +62,24 @@ func run(configPath string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	upstreams := make([]*upstream.Upstream, 0, len(cfg.Upstreams))
-	for _, u := range cfg.Upstreams {
-		proc, err := upstream.Start(ctx, u.Name, u.Command, u.Args, logger)
-		if err != nil {
-			return err
-		}
-		go forwardStderr(u.Name, proc.Stderr())
-		upstreams = append(upstreams, proc)
+	// Closing stdin on signal unblocks the proxy's blocking Read so Run can
+	// return promptly. Without this, Ctrl+C cancels the context but the read
+	// keeps blocking and the process never exits.
+	go func() {
+		<-ctx.Done()
+		_ = os.Stdin.Close()
+	}()
+
+	upstreams, err := startUpstreams(ctx, cfg.Upstreams, logger)
+	if err != nil {
+		return err
 	}
 
 	var dashSrv *dashboard.Server
 	var observer proxy.Observer
 	var wg sync.WaitGroup
 	if cfg.Dashboard.Enabled {
-		dashSrv = dashboard.New(cfg.Dashboard.Addr, logger)
+		dashSrv = dashboard.New(cfg.Dashboard.Addr, logger, cfg)
 		observer = func(o proxy.ToolCallObservation) {
 			dashSrv.Emit(dashboard.Event{
 				Time:      o.Time,
@@ -99,6 +102,22 @@ func run(configPath string) error {
 	filter := proxy.NewToolFilter(cfg.Tools)
 	p := proxy.New(clientConn, upstreams, filter, logger, observer)
 
+	if dashSrv != nil {
+		dashSrv.SetReloader(configPath, func(reloadCtx context.Context, newCfg *config.Config) error {
+			newUpstreams, err := startUpstreams(reloadCtx, newCfg.Upstreams, logger)
+			if err != nil {
+				return err
+			}
+			if err := p.Reload(reloadCtx, newUpstreams, proxy.NewToolFilter(newCfg.Tools)); err != nil {
+				for _, u := range newUpstreams {
+					u.Shutdown(2 * time.Second)
+				}
+				return err
+			}
+			return nil
+		})
+	}
+
 	runErr := p.Run(ctx)
 	cancel()
 	for _, u := range upstreams {
@@ -106,6 +125,25 @@ func run(configPath string) error {
 	}
 	wg.Wait()
 	return runErr
+}
+
+// startUpstreams launches each configured upstream subprocess and wires
+// stderr forwarding. Caller owns the lifetime; pair with Shutdown on each
+// or call Proxy.Reload to hand them off.
+func startUpstreams(ctx context.Context, list []config.Upstream, logger *slog.Logger) ([]*upstream.Upstream, error) {
+	out := make([]*upstream.Upstream, 0, len(list))
+	for _, u := range list {
+		proc, err := upstream.Start(ctx, u.Name, u.Command, u.Args, u.Env, logger)
+		if err != nil {
+			for _, started := range out {
+				started.Shutdown(2 * time.Second)
+			}
+			return nil, err
+		}
+		go forwardStderr(u.Name, proc.Stderr())
+		out = append(out, proc)
+	}
+	return out, nil
 }
 
 // forwardStderr reads `r` line by line and prints each line prefixed with

@@ -3,6 +3,7 @@
 package dashboard
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,8 +12,16 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/aeolus-labs/aeolus/internal/config"
+	"github.com/aeolus-labs/aeolus/internal/mcp"
+	"github.com/aeolus-labs/aeolus/internal/upstream"
+	"gopkg.in/yaml.v3"
 )
 
 // Event is a single tool call observed by the proxy.
@@ -32,19 +41,61 @@ type Server struct {
 	subscribers map[chan Event]struct{}
 	recent      []Event
 
+	cfgMu       sync.RWMutex
+	cfg         *config.Config
+	configPath  string
+	reloadFn    ReloadFunc // nil until SetReloader is called
+
+	catalogMu          sync.RWMutex
+	catalog            []CatalogEntry
+	catalogSubscribers map[chan CatalogBatch]struct{}
+	catalogLoading     atomic.Bool
+
 	maxRecent int
 	subBuffer int
 }
 
-func New(addr string, log *slog.Logger) *Server {
-	return &Server{
-		addr:        addr,
-		log:         log,
-		subscribers: make(map[chan Event]struct{}),
-		recent:      make([]Event, 0, 256),
-		maxRecent:   256,
-		subBuffer:   32,
+// ReloadFunc is invoked after a config change is persisted. It receives the
+// new validated config and is responsible for re-initializing the proxy.
+type ReloadFunc func(ctx context.Context, cfg *config.Config) error
+
+// CatalogBatch is a chunk of catalog entries emitted by /api/catalog/stream.
+// done == true on the final batch of a refresh cycle.
+type CatalogBatch struct {
+	Batch []CatalogEntry `json:"batch"`
+	Done  bool           `json:"done"`
+}
+
+func New(addr string, log *slog.Logger, cfg *config.Config) *Server {
+	s := &Server{
+		addr:               addr,
+		log:                log,
+		cfg:                cfg,
+		subscribers:        make(map[chan Event]struct{}),
+		recent:             make([]Event, 0, 256),
+		catalog:            nil, // populated by background registry fetch
+		catalogSubscribers: make(map[chan CatalogBatch]struct{}),
+		maxRecent:          256,
+		subBuffer:          32,
 	}
+	return s
+}
+
+// SetConfig replaces the current config snapshot served by /api/config.
+func (s *Server) SetConfig(cfg *config.Config) {
+	s.cfgMu.Lock()
+	s.cfg = cfg
+	s.cfgMu.Unlock()
+}
+
+// SetReloader wires the dashboard to a function that can re-initialize the
+// proxy with a new config, plus the path on disk where edits are persisted.
+// PUT /api/config returns an error if no reloader is set.
+func (s *Server) SetReloader(configPath string, fn ReloadFunc) {
+	s.cfgMu.Lock()
+	s.configPath = configPath
+	s.reloadFn = fn
+	s.cfgMu.Unlock()
 }
 
 // Emit records an event in the ring buffer and broadcasts it to subscribers.
@@ -70,9 +121,15 @@ func (s *Server) Emit(e Event) {
 
 // Run starts the HTTP server. Returns when ctx is canceled or the listener fails.
 func (s *Server) Run(ctx context.Context) error {
+	go s.refreshCatalogLoop(ctx)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/stats", s.handleStats)
+	mux.HandleFunc("/api/config", s.handleConfig)
+	mux.HandleFunc("/api/catalog", s.handleCatalog)
+	mux.HandleFunc("/api/catalog/stream", s.handleCatalogStream)
+	mux.HandleFunc("/api/probe", s.handleProbe)
 	if assets != nil {
 		mux.Handle("/", http.FileServer(http.FS(assets)))
 	}
@@ -161,8 +218,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func writeSSE(w io.Writer, e Event) error {
-	b, err := json.Marshal(e)
+func writeSSE(w io.Writer, payload any) error {
+	b, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
@@ -174,6 +231,322 @@ type statsResponse struct {
 	Upstreams []string `json:"upstreams"`
 	Total     int      `json:"total"`
 	Errors    int      `json:"errors"`
+}
+
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.cfgMu.RLock()
+		cfg := s.cfg
+		s.cfgMu.RUnlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(cfg)
+	case http.MethodPut:
+		s.handleConfigPut(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
+	s.cfgMu.RLock()
+	path := s.configPath
+	reload := s.reloadFn
+	s.cfgMu.RUnlock()
+	if path == "" || reload == nil {
+		http.Error(w, "config edits are not enabled in this build", http.StatusServiceUnavailable)
+		return
+	}
+
+	var newCfg config.Config
+	if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := config.Validate(&newCfg); err != nil {
+		http.Error(w, "invalid config: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	yamlBytes, err := yaml.Marshal(&newCfg)
+	if err != nil {
+		http.Error(w, "yaml marshal: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := atomicWriteFile(path, yamlBytes); err != nil {
+		http.Error(w, "write config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := reload(r.Context(), &newCfg); err != nil {
+		http.Error(w, "reload failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.cfgMu.Lock()
+	s.cfg = &newCfg
+	s.cfgMu.Unlock()
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(&newCfg)
+}
+
+// atomicWriteFile writes data to a sibling temp file and renames it into
+// place so a crash mid-write can't leave a half-written config.
+func atomicWriteFile(path string, data []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+type probeRequest struct {
+	Command string            `json:"command"`
+	Args    []string          `json:"args"`
+	Env     map[string]string `json:"env"`
+}
+
+func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req probeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.Command == "" {
+		http.Error(w, "command is required", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	envSlice := make([]string, 0, len(req.Env))
+	for k, v := range req.Env {
+		envSlice = append(envSlice, k+"="+v)
+	}
+
+	u, err := upstream.Start(ctx, "probe", req.Command, req.Args, envSlice, s.log)
+	if err != nil {
+		http.Error(w, "spawn failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer u.Shutdown(2 * time.Second)
+
+	// Capture upstream stderr so error responses can include the underlying
+	// reason (missing path arg, missing token, npm install failure, etc.).
+	stderrBuf := &captureBuf{}
+	if r := u.Stderr(); r != nil {
+		go func() { _, _ = io.Copy(stderrBuf, r) }()
+	}
+
+	probeErr := func(prefix string, err error) {
+		// Give stderr a beat to flush before we read it.
+		time.Sleep(150 * time.Millisecond)
+		msg := prefix + ": " + err.Error()
+		if se := strings.TrimSpace(stderrBuf.String()); se != "" {
+			msg += "\n\nupstream stderr:\n" + se
+		}
+		http.Error(w, msg, http.StatusBadRequest)
+	}
+
+	if _, err := u.Initialize(ctx, mcp.Info{Name: "aeolus-probe", Version: "0.3.0"}); err != nil {
+		probeErr("initialize failed", err)
+		return
+	}
+	resp, err := u.Request(ctx, mcp.MethodToolsList, struct{}{})
+	if err != nil {
+		probeErr("tools/list failed", err)
+		return
+	}
+	if resp.Error != nil {
+		http.Error(w, "upstream error: "+resp.Error.Message, http.StatusBadRequest)
+		return
+	}
+	var result mcp.ToolsListResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		http.Error(w, "parse failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"tools": result.Tools})
+}
+
+// captureBuf is a thread-safe bytes.Buffer for capturing subprocess stderr
+// across goroutine boundaries.
+type captureBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (c *captureBuf) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.Write(p)
+}
+
+func (c *captureBuf) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
+}
+
+func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.catalogMu.RLock()
+	cat := s.catalog
+	s.catalogMu.RUnlock()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(cat)
+}
+
+// refreshCatalogLoop fetches the MCP registry on startup and every hour after,
+// keeping the static catalog as a fallback if the network is unavailable.
+func (s *Server) refreshCatalogLoop(ctx context.Context) {
+	tick := time.NewTicker(time.Hour)
+	defer tick.Stop()
+	s.refreshCatalog(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			s.refreshCatalog(ctx)
+		}
+	}
+}
+
+// refreshCatalog walks the MCP registry one page at a time, appending each
+// page's mapped entries to the cache and broadcasting them to live subscribers.
+// A nil-batch with done=true is broadcast on completion.
+func (s *Server) refreshCatalog(ctx context.Context) {
+	if !s.catalogLoading.CompareAndSwap(false, true) {
+		return // refresh already in progress
+	}
+	defer s.catalogLoading.Store(false)
+	defer s.broadcastCatalog(nil, true)
+
+	started := time.Now()
+	client := &http.Client{Timeout: registryTimeout}
+	cursor := ""
+	pages := 0
+	seen := make(map[string]bool)
+	total := 0
+
+	for {
+		pages++
+		page, err := fetchRegistryPage(ctx, client, cursor)
+		if err != nil {
+			s.log.Warn("catalog_page_failed", "page", pages, "error", err.Error())
+			break
+		}
+		batch := make([]CatalogEntry, 0, 32)
+		for _, e := range page.Servers {
+			if !isLatest(e) {
+				continue
+			}
+			ce, ok := mapEntry(e.Server)
+			if !ok || seen[ce.ID] {
+				continue
+			}
+			seen[ce.ID] = true
+			batch = append(batch, ce)
+		}
+		if len(batch) > 0 {
+			s.catalogMu.Lock()
+			s.catalog = append(s.catalog, batch...)
+			s.catalogMu.Unlock()
+			s.broadcastCatalog(batch, false)
+			total += len(batch)
+		}
+		if page.Metadata.NextCursor == "" {
+			break
+		}
+		cursor = page.Metadata.NextCursor
+		if pages > 200 {
+			break
+		}
+	}
+	s.log.Info("catalog_refreshed",
+		"count", total,
+		"pages", pages,
+		"duration_ms", time.Since(started).Milliseconds(),
+	)
+}
+
+func (s *Server) broadcastCatalog(batch []CatalogEntry, done bool) {
+	s.catalogMu.RLock()
+	subs := make([]chan CatalogBatch, 0, len(s.catalogSubscribers))
+	for ch := range s.catalogSubscribers {
+		subs = append(subs, ch)
+	}
+	s.catalogMu.RUnlock()
+	msg := CatalogBatch{Batch: batch, Done: done}
+	for _, ch := range subs {
+		select {
+		case ch <- msg:
+		default:
+		}
+	}
+}
+
+func (s *Server) handleCatalogStream(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	ch := make(chan CatalogBatch, 16)
+	s.catalogMu.Lock()
+	s.catalogSubscribers[ch] = struct{}{}
+	initial := append([]CatalogEntry(nil), s.catalog...)
+	loading := s.catalogLoading.Load()
+	s.catalogMu.Unlock()
+
+	defer func() {
+		s.catalogMu.Lock()
+		delete(s.catalogSubscribers, ch)
+		s.catalogMu.Unlock()
+	}()
+
+	if err := writeSSE(w, CatalogBatch{Batch: initial, Done: !loading}); err != nil {
+		return
+	}
+	flusher.Flush()
+
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case msg := <-ch:
+			if err := writeSSE(w, msg); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-heartbeat.C:
+			if _, err := fmt.Fprintf(w, ": heartbeat\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {

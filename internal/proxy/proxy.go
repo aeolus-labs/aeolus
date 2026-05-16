@@ -26,11 +26,16 @@ const (
 )
 
 type Proxy struct {
-	client    *mcp.Conn
+	client   *mcp.Conn
+	log      *slog.Logger
+	observer Observer
+
+	// Protects upstreams + filter + cancels. Read by tools/list and tools/call
+	// hot paths (via short snapshots); written by Reload.
+	mu        sync.RWMutex
 	upstreams []*upstream.Upstream
-	log       *slog.Logger
 	filter    ToolFilter
-	observer  Observer
+	cancels   []context.CancelFunc // notification watchers, one per upstream
 
 	toolMu  sync.RWMutex
 	toolMap map[string]toolEntry // exposed name -> route + tool metadata
@@ -112,8 +117,31 @@ func (p *Proxy) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	clientInfo := mcp.Info{Name: proxyName, Version: proxyVersion}
+	if err := p.initUpstreams(ctx, p.upstreams); err != nil {
+		return err
+	}
+	if err := p.refreshTools(ctx); err != nil {
+		return err
+	}
+	p.log.Info("tools_loaded", "count", p.toolCount())
+
+	p.mu.Lock()
 	for _, u := range p.upstreams {
+		u := u
+		watcherCtx, c := context.WithCancel(ctx)
+		p.cancels = append(p.cancels, c)
+		go p.watchUpstreamNotifications(watcherCtx, u)
+	}
+	p.mu.Unlock()
+
+	return p.serveClient(ctx)
+}
+
+// initUpstreams performs the MCP initialize handshake on each upstream.
+// Called for both initial startup and Reload.
+func (p *Proxy) initUpstreams(ctx context.Context, upstreams []*upstream.Upstream) error {
+	clientInfo := mcp.Info{Name: proxyName, Version: proxyVersion}
+	for _, u := range upstreams {
 		result, err := u.Initialize(ctx, clientInfo)
 		if err != nil {
 			return fmt.Errorf("initialize %s: %w", u.Name, err)
@@ -124,18 +152,52 @@ func (p *Proxy) Run(ctx context.Context) error {
 			"protocol", result.ProtocolVersion,
 		)
 	}
+	return nil
+}
 
-	if err := p.refreshTools(ctx); err != nil {
+// Reload atomically swaps the proxy's upstreams and filter while keeping
+// the client connection open. New upstreams must already be Start()-ed; this
+// method initializes them, swaps state, refreshes tools, notifies the client,
+// then shuts down the old upstreams.
+func (p *Proxy) Reload(ctx context.Context, newUpstreams []*upstream.Upstream, newFilter ToolFilter) error {
+	if err := p.initUpstreams(ctx, newUpstreams); err != nil {
+		// Initialization failed; tear down anything we started.
+		for _, u := range newUpstreams {
+			u.Shutdown(2 * time.Second)
+		}
 		return err
 	}
-	p.log.Info("tools_loaded", "count", p.toolCount())
 
-	for _, u := range p.upstreams {
+	p.mu.Lock()
+	oldUpstreams := p.upstreams
+	oldCancels := p.cancels
+	p.upstreams = newUpstreams
+	p.filter = newFilter
+	p.cancels = make([]context.CancelFunc, 0, len(newUpstreams))
+	for _, u := range newUpstreams {
 		u := u
-		go p.watchUpstreamNotifications(ctx, u)
+		watcherCtx, c := context.WithCancel(ctx)
+		p.cancels = append(p.cancels, c)
+		go p.watchUpstreamNotifications(watcherCtx, u)
 	}
+	p.mu.Unlock()
 
-	return p.serveClient(ctx)
+	if err := p.refreshTools(ctx); err != nil {
+		p.log.Error("reload_refresh_failed", "error", err.Error())
+	}
+	_ = p.client.Write(&mcp.Message{
+		JSONRPC: "2.0",
+		Method:  mcp.MethodToolsListChanged,
+	})
+
+	for _, c := range oldCancels {
+		c()
+	}
+	for _, u := range oldUpstreams {
+		u.Shutdown(3 * time.Second)
+	}
+	p.log.Info("reload_complete", "upstreams", len(newUpstreams), "tools", p.toolCount())
+	return nil
 }
 
 func (p *Proxy) watchUpstreamNotifications(ctx context.Context, u *upstream.Upstream) {
@@ -169,8 +231,12 @@ func (p *Proxy) toolCount() int {
 }
 
 func (p *Proxy) refreshTools(ctx context.Context) error {
+	p.mu.RLock()
+	upstreams := append([]*upstream.Upstream(nil), p.upstreams...)
+	p.mu.RUnlock()
+
 	next := make(map[string]toolEntry)
-	for _, u := range p.upstreams {
+	for _, u := range upstreams {
 		if err := fetchTools(ctx, u, next); err != nil {
 			return err
 		}
@@ -291,10 +357,14 @@ func (p *Proxy) replyInitialize(msg *mcp.Message) error {
 }
 
 func (p *Proxy) replyToolsList(msg *mcp.Message) error {
+	p.mu.RLock()
+	filter := p.filter
+	p.mu.RUnlock()
+
 	p.toolMu.RLock()
 	tools := make([]mcp.Tool, 0, len(p.toolMap))
 	for _, e := range p.toolMap {
-		if !p.filter.Allowed(e.tool.Name) {
+		if !filter.Allowed(e.tool.Name) {
 			continue
 		}
 		tools = append(tools, e.tool)
@@ -332,7 +402,10 @@ func (p *Proxy) routeToolsCall(ctx context.Context, msg *mcp.Message) error {
 	if !ok {
 		return p.replyError(msg.ID, -32601, "Tool not found: "+params.Name)
 	}
-	if !p.filter.Allowed(params.Name) {
+	p.mu.RLock()
+	filter := p.filter
+	p.mu.RUnlock()
+	if !filter.Allowed(params.Name) {
 		p.log.Warn("tools_call_denied", "tool", params.Name)
 		return p.replyError(msg.ID, -32601, "Tool not allowed: "+params.Name)
 	}

@@ -57,8 +57,12 @@ func FromConn(name string, conn *mcp.Conn, log *slog.Logger) *Upstream {
 
 // Start launches the MCP server subprocess and begins reading its stdout.
 // The returned Upstream is connected but not yet initialized — call Initialize.
-func Start(ctx context.Context, name, command string, args []string, log *slog.Logger) (*Upstream, error) {
+// env entries are appended to the inherited process environment.
+func Start(ctx context.Context, name, command string, args []string, env []string, log *slog.Logger) (*Upstream, error) {
 	cmd := exec.CommandContext(ctx, command, args...)
+	if len(env) > 0 {
+		cmd.Env = append(cmd.Environ(), env...)
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
