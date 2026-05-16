@@ -24,7 +24,13 @@ import (
 
 const shutdownTimeout = 1500 * time.Millisecond
 
-const version = "0.3.10-dev"
+// Build-injected version metadata. Defaults are for non-release builds
+// (e.g. `go build` directly); goreleaser overrides them via -ldflags.
+var (
+	version = "dev"
+	commit  = ""
+	date    = ""
+)
 
 const starterConfig = `# Aeolus configuration.
 # Docs + client setup: https://github.com/aeolus-labs/aeolus
@@ -69,7 +75,15 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println("aeolus", version)
+		extra := ""
+		if commit != "" {
+			extra = " (" + commit
+			if date != "" {
+				extra += ", " + date
+			}
+			extra += ")"
+		}
+		fmt.Printf("aeolus %s%s\n", version, extra)
 		return
 	}
 	if *configPath == "" {

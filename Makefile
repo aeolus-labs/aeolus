@@ -1,4 +1,4 @@
-.PHONY: all build build-go build-web dev-web test clean
+.PHONY: all build build-go build-web dev-web test clean release-test release-snapshot
 
 all: build
 
@@ -19,7 +19,17 @@ dev-web:
 test:
 	go test ./...
 
+# Verify goreleaser config without producing artifacts.
+release-test:
+	goreleaser check
+
+# Build cross-platform release artifacts locally (dist/), no publish.
+# Useful for sanity-checking the pipeline before tagging.
+release-snapshot:
+	goreleaser release --snapshot --clean --skip=publish
+
 clean:
 	rm -f aeolus
 	rm -rf internal/dashboard/web/index.html internal/dashboard/web/assets
 	rm -rf dashboard/node_modules
+	rm -rf dist

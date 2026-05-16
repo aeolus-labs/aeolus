@@ -1,0 +1,90 @@
+version: 2
+
+# Build the embedded React dashboard before cross-compiling the Go binary.
+# Without this, `go build` would embed an empty internal/dashboard/web.
+before:
+  hooks:
+    - sh -c "cd dashboard && npm ci --no-fund --no-audit"
+    - sh -c "cd dashboard && npm run build"
+
+builds:
+  - id: aeolus
+    main: ./cmd/aeolus
+    binary: aeolus
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - id: aeolus
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else }}{{ .Arch }}{{ end }}
+    files:
+      - LICENSE
+      - README.md
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+# Releases land as drafts. They stay invisible to the public until someone
+# manually clicks Publish in the GitHub UI. Safe default for the
+# "infrastructure built, not launched yet" phase.
+release:
+  draft: true
+  prerelease: auto
+  github:
+    owner: aeolus-labs
+    name: aeolus
+  header: |
+    ## Aeolus {{.Version}}
+
+    Local gateway for Model Context Protocol (MCP) servers.
+
+    See the [README](https://github.com/aeolus-labs/aeolus#readme) for installation and client setup.
+  footer: |
+    ---
+    Built from commit `{{.ShortCommit}}`.
+
+# Homebrew formula is generated into a separate aeolus-labs/homebrew-tap
+# repo. Stays commented out until that repo + a HOMEBREW_TAP_GITHUB_TOKEN
+# secret exist. Uncomment when ready.
+#
+# brews:
+#   - name: aeolus
+#     repository:
+#       owner: aeolus-labs
+#       name: homebrew-tap
+#       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+#     homepage: "https://github.com/aeolus-labs/aeolus"
+#     description: "Local gateway for Model Context Protocol (MCP) servers"
+#     license: "MIT"
+#     install: |
+#       bin.install "aeolus"
+#     test: |
+#       system "#{bin}/aeolus", "--version"
