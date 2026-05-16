@@ -17,15 +17,25 @@ const (
 )
 
 // CatalogEntry describes one MCP server the UI can offer to add.
-// Env values use {{PLACEHOLDER}} syntax for variables the user must fill in.
+// Env / Header values use {{PLACEHOLDER}} syntax for fields the user must
+// fill in. Transport defaults to "stdio" when Command is set; "http" when
+// URL is set.
 type CatalogEntry struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Description string            `json:"description"`
-	Command     string            `json:"command"`
-	Args        []string          `json:"args"`
-	Env         map[string]string `json:"env,omitempty"`
-	Notes       string            `json:"notes,omitempty"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Transport   string `json:"transport,omitempty"`
+
+	// stdio
+	Command string            `json:"command,omitempty"`
+	Args    []string          `json:"args,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+
+	// http
+	URL     string            `json:"url,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+
+	Notes string `json:"notes,omitempty"`
 }
 
 // Wire types matching the registry response.
@@ -184,12 +194,24 @@ func isLatest(e registryEntry) bool {
 	return latest
 }
 
-// mapEntry converts a registry server into a CatalogEntry, preferring an
-// npm/stdio package since stdio is the only transport Aeolus currently
-// supports. Returns false if no usable package is found.
+// mapEntry converts a registry server into a CatalogEntry. Prefers an
+// npm/stdio package (most reliable to spawn locally); falls back to a
+// streamable-http remote when no npm package is available. Returns false
+// when neither is usable.
 func mapEntry(s registryServer) (CatalogEntry, bool) {
 	pkg, ok := pickPackage(s.Packages)
 	if !ok {
+		for _, r := range s.Remotes {
+			if r.Type == "streamable-http" && r.URL != "" {
+				return CatalogEntry{
+					ID:          s.Name,
+					Name:        displayName(s),
+					Description: s.Description,
+					Transport:   "http",
+					URL:         r.URL,
+				}, true
+			}
+		}
 		return CatalogEntry{}, false
 	}
 
@@ -222,6 +244,7 @@ func mapEntry(s registryServer) (CatalogEntry, bool) {
 		ID:          s.Name,
 		Name:        displayName(s),
 		Description: s.Description,
+		Transport:   "stdio",
 		Command:     "npx",
 		Args:        []string{"-y", identifier},
 		Env:         env,

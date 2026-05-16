@@ -201,14 +201,16 @@ function UpstreamCard({
   const ownDeny = denyList.filter((r) => r === wildcard || r.startsWith(prefix))
   const ruleCount = ownAllow.length + ownDeny.length
 
+  const transport = upstream.transport === 'http' ? 'http' : 'stdio'
   const argsLine = (upstream.args ?? []).join(' ')
   const envCount = (upstream.env ?? []).length
+  const headerCount = Object.keys(upstream.headers ?? {}).length
 
   return (
     <div className="card">
       <div className="card-header">
         <span className="card-title">{upstream.name}</span>
-        <span className="badge">stdio</span>
+        <span className="badge">{transport}</span>
       </div>
       <div className="card-subtabs">
         <button
@@ -227,10 +229,21 @@ function UpstreamCard({
       <div className="card-body">
         {tab === 'setup' && (
           <>
-            <Row label="command" value={upstream.command ?? '—'} mono />
-            {argsLine && <Row label="args" value={argsLine} mono />}
-            {envCount > 0 && (
-              <Row label="env" value={`${envCount} variable${envCount === 1 ? '' : 's'}`} />
+            {transport === 'stdio' ? (
+              <>
+                <Row label="command" value={upstream.command ?? '—'} mono />
+                {argsLine && <Row label="args" value={argsLine} mono />}
+                {envCount > 0 && (
+                  <Row label="env" value={`${envCount} variable${envCount === 1 ? '' : 's'}`} />
+                )}
+              </>
+            ) : (
+              <>
+                <Row label="url" value={upstream.url ?? '—'} mono />
+                {headerCount > 0 && (
+                  <Row label="headers" value={`${headerCount} header${headerCount === 1 ? '' : 's'}`} />
+                )}
+              </>
             )}
           </>
         )}

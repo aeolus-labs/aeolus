@@ -20,9 +20,14 @@ export default function AddUpstream({ config, catalog, editing, onClose, onSaved
   const [step, setStep] = useState<'pick' | 'probe' | 'tools'>(isEdit ? 'probe' : 'pick')
 
   const [name, setName] = useState(editing?.name ?? '')
+  const [transport, setTransport] = useState<'stdio' | 'http'>(
+    (editing?.transport === 'http' ? 'http' : 'stdio')
+  )
   const [command, setCommand] = useState(editing?.command ?? '')
   const [args, setArgs] = useState(editing?.args?.join('\n') ?? '')
   const [envEntries, setEnvEntries] = useState<EnvRow[]>(parseEnv(editing?.env))
+  const [url, setUrl] = useState(editing?.url ?? '')
+  const [headerEntries, setHeaderEntries] = useState<EnvRow[]>(parseHeaders(editing?.headers))
   const [catalogSearch, setCatalogSearch] = useState('')
 
   const [probedTools, setProbedTools] = useState<ProbedTool[] | null>(null)
@@ -47,15 +52,33 @@ export default function AddUpstream({ config, catalog, editing, onClose, onSaved
   function applyCatalog(entry: CatalogEntry) {
     const slug = lastSegment(entry.id) || entry.name
     setName(slug)
-    setCommand(entry.command)
-    setArgs(entry.args.join('\n'))
-    setEnvEntries(
-      Object.entries(entry.env ?? {}).map(([key, value]) => ({
-        key,
-        value: value.startsWith('{{') ? '' : value,
-        secure: false,
-      }))
-    )
+    const t = entry.transport === 'http' ? 'http' : 'stdio'
+    setTransport(t)
+    if (t === 'http') {
+      setUrl(entry.url ?? '')
+      setHeaderEntries(
+        Object.entries(entry.headers ?? {}).map(([key, value]) => ({
+          key,
+          value: value.startsWith('{{') ? '' : value,
+          secure: false,
+        }))
+      )
+      setCommand('')
+      setArgs('')
+      setEnvEntries([])
+    } else {
+      setCommand(entry.command ?? '')
+      setArgs((entry.args ?? []).join('\n'))
+      setEnvEntries(
+        Object.entries(entry.env ?? {}).map(([key, value]) => ({
+          key,
+          value: value.startsWith('{{') ? '' : value,
+          secure: false,
+        }))
+      )
+      setUrl('')
+      setHeaderEntries([])
+    }
     setStep('probe')
   }
 
@@ -64,20 +87,23 @@ export default function AddUpstream({ config, catalog, editing, onClose, onSaved
     setProbing(true)
     setProbedTools(null)
     try {
-      // For probing, resolve secure values to their actual secrets when possible.
-      // Keychain references can't be resolved client-side, so we send them as-is;
-      // the server's probe path doesn't currently fetch from keychain — but since
-      // probe is a one-off, "retype the secret" is acceptable UX.
-      const env: Record<string, string> = {}
-      for (const e of envEntries) if (e.key) env[e.key] = e.value
+      const body: Record<string, unknown> = { transport }
+      if (transport === 'stdio') {
+        body.command = command
+        body.args = argsLines(args)
+        const env: Record<string, string> = {}
+        for (const e of envEntries) if (e.key) env[e.key] = e.value
+        body.env = env
+      } else {
+        body.url = url
+        const headers: Record<string, string> = {}
+        for (const e of headerEntries) if (e.key) headers[e.key] = e.value
+        body.headers = headers
+      }
       const r = await fetch('/api/probe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          command,
-          args: argsLines(args),
-          env,
-        }),
+        body: JSON.stringify(body),
       })
       if (!r.ok) throw new Error(await r.text())
       const data = (await r.json()) as { tools: ProbedTool[] }
@@ -106,38 +132,24 @@ export default function AddUpstream({ config, catalog, editing, onClose, onSaved
     setSaving(true)
     setError(null)
     try {
-      const newUpstream: Upstream = {
-        name,
-        command,
-        args: argsLines(args),
-      }
-
-      // Convert env rows to wire-format strings. Secure rows whose values are
-      // not already keychain references are POSTed to /api/secrets and then
-      // stored in the config as keychain:<name> references.
-      const envSlice: string[] = []
-      for (const e of envEntries) {
-        if (!e.key) continue
-        if (e.secure && !e.value.startsWith('keychain:')) {
-          if (!e.value) {
-            throw new Error(`Secure variable ${e.key} has no value to store`)
-          }
-          if (e.value === '***') {
-            throw new Error(`Re-enter the value for ${e.key} before enabling secure storage`)
-          }
-          const secretName = `${name}.${e.key}`
-          const r = await fetch(`/api/secrets/${encodeURIComponent(secretName)}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ value: e.value }),
-          })
-          if (!r.ok) throw new Error(`Save ${e.key} to keychain failed: ${await r.text()}`)
-          envSlice.push(`${e.key}=keychain:${secretName}`)
-        } else {
-          envSlice.push(`${e.key}=${e.value}`)
+      const newUpstream: Upstream = { name, transport }
+      if (transport === 'stdio') {
+        newUpstream.command = command
+        newUpstream.args = argsLines(args)
+        const envSlice = await processSecretRows(envEntries, `${name}`)
+        if (envSlice.length > 0) {
+          newUpstream.env = envSlice.map(([k, v]) => `${k}=${v}`)
+        }
+      } else {
+        if (!url) throw new Error('URL is required for http transport')
+        newUpstream.url = url
+        const headerKVs = await processSecretRows(headerEntries, `${name}.headers`)
+        if (headerKVs.length > 0) {
+          const headersMap: Record<string, string> = {}
+          for (const [k, v] of headerKVs) headersMap[k] = v
+          newUpstream.headers = headersMap
         }
       }
-      if (envSlice.length > 0) newUpstream.env = envSlice
 
       const nextUpstreams = isEdit
         ? config.upstreams.map((u) => (u.name === editing!.name ? newUpstream : u))
@@ -213,12 +225,18 @@ export default function AddUpstream({ config, catalog, editing, onClose, onSaved
           <FormStep
             name={name}
             onName={setName}
+            transport={transport}
+            onTransport={setTransport}
             command={command}
             onCommand={setCommand}
             args={args}
             onArgs={setArgs}
             envEntries={envEntries}
             onEnvEntries={setEnvEntries}
+            url={url}
+            onUrl={setUrl}
+            headerEntries={headerEntries}
+            onHeaderEntries={setHeaderEntries}
           />
         )}
 
@@ -242,7 +260,11 @@ export default function AddUpstream({ config, catalog, editing, onClose, onSaved
           <footer className="modal-footer">
             <button className="btn-secondary" onClick={onClose} disabled={saving}>Cancel</button>
             {step === 'probe' && (
-              <button className="btn-primary" onClick={probe} disabled={probing || !command}>
+              <button
+                className="btn-primary"
+                onClick={probe}
+                disabled={probing || (transport === 'stdio' ? !command : !url)}
+              >
                 {probing ? 'Probing…' : 'Probe tools'}
               </button>
             )}
@@ -295,12 +317,18 @@ function CatalogStep(props: {
 function FormStep(props: {
   name: string
   onName: (s: string) => void
+  transport: 'stdio' | 'http'
+  onTransport: (t: 'stdio' | 'http') => void
   command: string
   onCommand: (s: string) => void
   args: string
   onArgs: (s: string) => void
   envEntries: EnvRow[]
   onEnvEntries: (e: EnvRow[]) => void
+  url: string
+  onUrl: (s: string) => void
+  headerEntries: EnvRow[]
+  onHeaderEntries: (e: EnvRow[]) => void
 }) {
   return (
     <div className="modal-body">
@@ -312,26 +340,62 @@ function FormStep(props: {
           placeholder="e.g. filesystem"
         />
       </Field>
-      <Field label="Command">
-        <input
-          className="text-input mono"
-          value={props.command}
-          onChange={(e) => props.onCommand(e.target.value)}
-          placeholder="npx"
-        />
+      <Field label="Transport">
+        <div className="segmented">
+          <button
+            type="button"
+            className={`segment ${props.transport === 'stdio' ? 'segment-active' : ''}`}
+            onClick={() => props.onTransport('stdio')}
+          >
+            Subprocess (stdio)
+          </button>
+          <button
+            type="button"
+            className={`segment ${props.transport === 'http' ? 'segment-active' : ''}`}
+            onClick={() => props.onTransport('http')}
+          >
+            HTTP endpoint
+          </button>
+        </div>
       </Field>
-      <Field label="Args" hint="One per line">
-        <textarea
-          className="text-input mono"
-          rows={4}
-          value={props.args}
-          onChange={(e) => props.onArgs(e.target.value)}
-          placeholder={`-y\n@modelcontextprotocol/server-filesystem\n/tmp`}
-        />
-      </Field>
-      <Field label="Environment variables">
-        <EnvEditor entries={props.envEntries} onChange={props.onEnvEntries} />
-      </Field>
+      {props.transport === 'stdio' ? (
+        <>
+          <Field label="Command">
+            <input
+              className="text-input mono"
+              value={props.command}
+              onChange={(e) => props.onCommand(e.target.value)}
+              placeholder="npx"
+            />
+          </Field>
+          <Field label="Args" hint="One per line">
+            <textarea
+              className="text-input mono"
+              rows={4}
+              value={props.args}
+              onChange={(e) => props.onArgs(e.target.value)}
+              placeholder={`-y\n@modelcontextprotocol/server-filesystem\n/tmp`}
+            />
+          </Field>
+          <Field label="Environment variables">
+            <EnvEditor entries={props.envEntries} onChange={props.onEnvEntries} />
+          </Field>
+        </>
+      ) : (
+        <>
+          <Field label="URL">
+            <input
+              className="text-input mono"
+              value={props.url}
+              onChange={(e) => props.onUrl(e.target.value)}
+              placeholder="https://mcp.example.com/mcp"
+            />
+          </Field>
+          <Field label="HTTP headers" hint="Authorization, X-Api-Key, etc.">
+            <EnvEditor entries={props.headerEntries} onChange={props.onHeaderEntries} />
+          </Field>
+        </>
+      )}
     </div>
   )
 }
@@ -528,6 +592,46 @@ function parseEnv(env?: string[]): EnvRow[] {
     const value = i < 0 ? '' : s.slice(i + 1)
     return { key, value, secure: value.startsWith('keychain:') }
   })
+}
+
+function parseHeaders(headers?: Record<string, string>): EnvRow[] {
+  if (!headers) return []
+  return Object.entries(headers).map(([key, value]) => ({
+    key,
+    value,
+    secure: value.startsWith('keychain:'),
+  }))
+}
+
+// processSecretRows POSTs secure values to /api/secrets and returns the
+// resulting [key, value] pairs ready to be written to config. Plain rows
+// are passed through unchanged. The namespace argument is used to build
+// the keychain entry name (e.g. "<upstream>" for env, "<upstream>.headers"
+// for HTTP headers) so the two never collide.
+async function processSecretRows(rows: EnvRow[], namespace: string): Promise<Array<[string, string]>> {
+  const out: Array<[string, string]> = []
+  for (const e of rows) {
+    if (!e.key) continue
+    if (e.secure && !e.value.startsWith('keychain:')) {
+      if (!e.value) {
+        throw new Error(`Secure value for ${e.key} is empty`)
+      }
+      if (e.value === '***') {
+        throw new Error(`Re-enter the value for ${e.key} before enabling secure storage`)
+      }
+      const secretName = `${namespace}.${e.key}`
+      const r = await fetch(`/api/secrets/${encodeURIComponent(secretName)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: e.value }),
+      })
+      if (!r.ok) throw new Error(`Save ${e.key} to keychain failed: ${await r.text()}`)
+      out.push([e.key, `keychain:${secretName}`])
+    } else {
+      out.push([e.key, e.value])
+    }
+  }
+  return out
 }
 
 function errMsg(err: unknown): string {

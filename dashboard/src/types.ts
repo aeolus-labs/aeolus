@@ -16,9 +16,12 @@ export type Stats = {
 
 export type Upstream = {
   name: string
+  transport?: string
   command?: string
   args?: string[]
   env?: string[]
+  url?: string
+  headers?: Record<string, string>
 }
 
 export type Tools = {
@@ -47,8 +50,11 @@ export type CatalogEntry = {
   id: string
   name: string
   description: string
-  command: string
-  args: string[]
+  transport?: string
+  command?: string
+  args?: string[]
   env?: Record<string, string>
+  url?: string
+  headers?: Record<string, string>
   notes?: string
 }
