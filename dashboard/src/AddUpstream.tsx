@@ -22,7 +22,7 @@ export default function AddUpstream({ config, catalog, editing, onClose, onSaved
   const [name, setName] = useState(editing?.name ?? '')
   const [command, setCommand] = useState(editing?.command ?? '')
   const [args, setArgs] = useState(editing?.args?.join('\n') ?? '')
-  const [envEntries, setEnvEntries] = useState<Array<{ key: string; value: string }>>(parseEnv(editing?.env))
+  const [envEntries, setEnvEntries] = useState<EnvRow[]>(parseEnv(editing?.env))
   const [catalogSearch, setCatalogSearch] = useState('')
 
   const [probedTools, setProbedTools] = useState<ProbedTool[] | null>(null)
@@ -50,7 +50,11 @@ export default function AddUpstream({ config, catalog, editing, onClose, onSaved
     setCommand(entry.command)
     setArgs(entry.args.join('\n'))
     setEnvEntries(
-      Object.entries(entry.env ?? {}).map(([key, value]) => ({ key, value: value.startsWith('{{') ? '' : value }))
+      Object.entries(entry.env ?? {}).map(([key, value]) => ({
+        key,
+        value: value.startsWith('{{') ? '' : value,
+        secure: false,
+      }))
     )
     setStep('probe')
   }
@@ -60,6 +64,10 @@ export default function AddUpstream({ config, catalog, editing, onClose, onSaved
     setProbing(true)
     setProbedTools(null)
     try {
+      // For probing, resolve secure values to their actual secrets when possible.
+      // Keychain references can't be resolved client-side, so we send them as-is;
+      // the server's probe path doesn't currently fetch from keychain — but since
+      // probe is a one-off, "retype the secret" is acceptable UX.
       const env: Record<string, string> = {}
       for (const e of envEntries) if (e.key) env[e.key] = e.value
       const r = await fetch('/api/probe', {
@@ -103,9 +111,32 @@ export default function AddUpstream({ config, catalog, editing, onClose, onSaved
         command,
         args: argsLines(args),
       }
-      const envSlice = envEntries
-        .filter((e) => e.key)
-        .map((e) => `${e.key}=${e.value}`)
+
+      // Convert env rows to wire-format strings. Secure rows whose values are
+      // not already keychain references are POSTed to /api/secrets and then
+      // stored in the config as keychain:<name> references.
+      const envSlice: string[] = []
+      for (const e of envEntries) {
+        if (!e.key) continue
+        if (e.secure && !e.value.startsWith('keychain:')) {
+          if (!e.value) {
+            throw new Error(`Secure variable ${e.key} has no value to store`)
+          }
+          if (e.value === '***') {
+            throw new Error(`Re-enter the value for ${e.key} before enabling secure storage`)
+          }
+          const secretName = `${name}.${e.key}`
+          const r = await fetch(`/api/secrets/${encodeURIComponent(secretName)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ value: e.value }),
+          })
+          if (!r.ok) throw new Error(`Save ${e.key} to keychain failed: ${await r.text()}`)
+          envSlice.push(`${e.key}=keychain:${secretName}`)
+        } else {
+          envSlice.push(`${e.key}=${e.value}`)
+        }
+      }
       if (envSlice.length > 0) newUpstream.env = envSlice
 
       const nextUpstreams = isEdit
@@ -268,8 +299,8 @@ function FormStep(props: {
   onCommand: (s: string) => void
   args: string
   onArgs: (s: string) => void
-  envEntries: Array<{ key: string; value: string }>
-  onEnvEntries: (e: Array<{ key: string; value: string }>) => void
+  envEntries: EnvRow[]
+  onEnvEntries: (e: EnvRow[]) => void
 }) {
   return (
     <div className="modal-body">
@@ -309,48 +340,72 @@ function EnvEditor({
   entries,
   onChange,
 }: {
-  entries: Array<{ key: string; value: string }>
-  onChange: (e: Array<{ key: string; value: string }>) => void
+  entries: EnvRow[]
+  onChange: (e: EnvRow[]) => void
 }) {
+  function update(i: number, patch: Partial<EnvRow>) {
+    const next = [...entries]
+    next[i] = { ...entries[i], ...patch }
+    onChange(next)
+  }
+
   return (
     <div className="env-editor">
-      {entries.map((e, i) => (
-        <div key={i} className="env-row">
-          <input
-            className="text-input mono env-key"
-            value={e.key}
-            placeholder="KEY"
-            onChange={(ev) => {
-              const next = [...entries]
-              next[i] = { ...e, key: ev.target.value }
-              onChange(next)
-            }}
-          />
-          <input
-            className="text-input mono env-value"
-            type="password"
-            autoComplete="off"
-            spellCheck={false}
-            value={e.value}
-            placeholder="value"
-            onChange={(ev) => {
-              const next = [...entries]
-              next[i] = { ...e, value: ev.target.value }
-              onChange(next)
-            }}
-          />
-          <button
-            className="btn-icon"
-            onClick={() => onChange(entries.filter((_, j) => j !== i))}
-            aria-label="Remove"
-          >
-            ×
-          </button>
-        </div>
-      ))}
+      {entries.map((e, i) => {
+        const isKeychainRef = e.value.startsWith('keychain:')
+        const isMasked = e.value === '***'
+        return (
+          <div key={i} className="env-row">
+            <input
+              className="text-input mono env-key"
+              value={e.key}
+              placeholder="KEY"
+              onChange={(ev) => update(i, { key: ev.target.value })}
+            />
+            <input
+              className="text-input mono env-value"
+              type={e.secure && !isKeychainRef ? 'password' : 'text'}
+              autoComplete="off"
+              spellCheck={false}
+              value={e.value}
+              placeholder={e.secure ? 'secret value' : 'value'}
+              onChange={(ev) => update(i, { value: ev.target.value })}
+            />
+            <button
+              className={`btn-icon ${e.secure ? 'btn-icon-active' : ''}`}
+              onClick={() => {
+                if (!e.secure && isMasked) return // disabled: must retype first
+                const turningOff = e.secure
+                update(i, {
+                  secure: !e.secure,
+                  // Clear keychain refs when turning off so the user retypes a plain value.
+                  value: turningOff && isKeychainRef ? '' : e.value,
+                })
+              }}
+              disabled={!e.secure && isMasked}
+              title={
+                e.secure
+                  ? 'Secured in OS keychain — click to switch to plaintext'
+                  : isMasked
+                    ? 'Clear the value and re-type before securing'
+                    : 'Click to store value in OS keychain'
+              }
+            >
+              {e.secure ? '🔒' : '🔓'}
+            </button>
+            <button
+              className="btn-icon"
+              onClick={() => onChange(entries.filter((_, j) => j !== i))}
+              aria-label="Remove"
+            >
+              ×
+            </button>
+          </div>
+        )
+      })}
       <button
         className="btn-secondary"
-        onClick={() => onChange([...entries, { key: '', value: '' }])}
+        onClick={() => onChange([...entries, { key: '', value: '', secure: false }])}
       >
         + Add variable
       </button>
@@ -461,12 +516,17 @@ function stripUpstreamRules(rules: string[] | undefined, upstreamName: string): 
   return rules.filter((r) => r !== `${upstreamName}.*` && !r.startsWith(prefix))
 }
 
-function parseEnv(env?: string[]): Array<{ key: string; value: string }> {
+// EnvRow is the in-modal representation of one env var. `secure` is true
+// when the value is (or will be on save) backed by the OS keychain.
+type EnvRow = { key: string; value: string; secure: boolean }
+
+function parseEnv(env?: string[]): EnvRow[] {
   if (!env) return []
   return env.map((s) => {
     const i = s.indexOf('=')
-    if (i < 0) return { key: s, value: '' }
-    return { key: s.slice(0, i), value: s.slice(i + 1) }
+    const key = i < 0 ? s : s.slice(0, i)
+    const value = i < 0 ? '' : s.slice(i + 1)
+    return { key, value, secure: value.startsWith('keychain:') }
   })
 }
 

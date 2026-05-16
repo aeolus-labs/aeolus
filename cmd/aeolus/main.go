@@ -63,11 +63,15 @@ func run(configPath string) error {
 	defer cancel()
 
 	// Closing stdin on signal unblocks the proxy's blocking Read so Run can
-	// return promptly. Without this, Ctrl+C cancels the context but the read
-	// keeps blocking and the process never exits.
+	// return promptly. The hard fallback below guarantees the process exits
+	// within 10 seconds even if a goroutine deadlocks during shutdown.
 	go func() {
 		<-ctx.Done()
+		fmt.Fprintln(os.Stderr, "aeolus: shutting down...")
 		_ = os.Stdin.Close()
+		time.Sleep(10 * time.Second)
+		fmt.Fprintln(os.Stderr, "aeolus: shutdown timeout, forcing exit")
+		os.Exit(1)
 	}()
 
 	upstreams, err := startUpstreams(ctx, cfg.Upstreams, logger)
@@ -120,9 +124,19 @@ func run(configPath string) error {
 
 	runErr := p.Run(ctx)
 	cancel()
+
+	// Shut everything down concurrently so the worst case is bounded by the
+	// slowest single component, not the sum of all components.
+	var shutdownWg sync.WaitGroup
 	for _, u := range upstreams {
-		u.Shutdown(shutdownTimeout)
+		u := u
+		shutdownWg.Add(1)
+		go func() {
+			defer shutdownWg.Done()
+			u.Shutdown(shutdownTimeout)
+		}()
 	}
+	shutdownWg.Wait()
 	wg.Wait()
 	return runErr
 }

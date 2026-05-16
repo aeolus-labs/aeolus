@@ -11,12 +11,48 @@ import (
 	"log/slog"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/aeolus-labs/aeolus/internal/mcp"
+	"github.com/aeolus-labs/aeolus/internal/secrets"
 )
+
+// keychainPrefix marks an env value that should be resolved from the OS
+// keychain at spawn time. e.g. GITHUB_TOKEN=keychain:github.GITHUB_TOKEN
+const keychainPrefix = "keychain:"
+
+// resolveEnv replaces any "keychain:<name>" values with the actual secret
+// retrieved from the system keychain. Returns an error if a referenced
+// secret is missing — the caller should surface that to the operator
+// instead of silently spawning a server with a half-configured environment.
+func resolveEnv(env []string) ([]string, error) {
+	if len(env) == 0 {
+		return env, nil
+	}
+	out := make([]string, len(env))
+	for i, e := range env {
+		eq := strings.Index(e, "=")
+		if eq < 0 {
+			out[i] = e
+			continue
+		}
+		key, value := e[:eq], e[eq+1:]
+		if !strings.HasPrefix(value, keychainPrefix) {
+			out[i] = e
+			continue
+		}
+		ref := strings.TrimPrefix(value, keychainPrefix)
+		secret, err := secrets.Get(ref)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s=keychain:%s: %w", key, ref, err)
+		}
+		out[i] = key + "=" + secret
+	}
+	return out, nil
+}
 
 // Upstream is a connected MCP server.
 type Upstream struct {
@@ -59,9 +95,13 @@ func FromConn(name string, conn *mcp.Conn, log *slog.Logger) *Upstream {
 // The returned Upstream is connected but not yet initialized — call Initialize.
 // env entries are appended to the inherited process environment.
 func Start(ctx context.Context, name, command string, args []string, env []string, log *slog.Logger) (*Upstream, error) {
+	resolvedEnv, err := resolveEnv(env)
+	if err != nil {
+		return nil, fmt.Errorf("upstream %s: %w", name, err)
+	}
 	cmd := exec.CommandContext(ctx, command, args...)
-	if len(env) > 0 {
-		cmd.Env = append(cmd.Environ(), env...)
+	if len(resolvedEnv) > 0 {
+		cmd.Env = append(cmd.Environ(), resolvedEnv...)
 	}
 
 	stdin, err := cmd.StdinPipe()

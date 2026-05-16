@@ -20,6 +20,7 @@ import (
 
 	"github.com/aeolus-labs/aeolus/internal/config"
 	"github.com/aeolus-labs/aeolus/internal/mcp"
+	"github.com/aeolus-labs/aeolus/internal/secrets"
 	"github.com/aeolus-labs/aeolus/internal/upstream"
 	"gopkg.in/yaml.v3"
 )
@@ -130,6 +131,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/catalog", s.handleCatalog)
 	mux.HandleFunc("/api/catalog/stream", s.handleCatalogStream)
 	mux.HandleFunc("/api/probe", s.handleProbe)
+	mux.HandleFunc("/api/secrets/", s.handleSecret)
 	if assets != nil {
 		mux.Handle("/", http.FileServer(http.FS(assets)))
 	}
@@ -253,8 +255,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// maskedConfig returns a copy of cfg with all env values replaced by
-// secretMask, leaving keys intact. The original cfg is not mutated.
+// maskedConfig returns a copy of cfg with plaintext env values replaced by
+// secretMask. keychain:* references stay visible — they're pointers, not
+// secrets — so the UI can show that a value is keychain-backed.
 func maskedConfig(cfg *config.Config) *config.Config {
 	if cfg == nil {
 		return nil
@@ -266,10 +269,16 @@ func maskedConfig(cfg *config.Config) *config.Config {
 		if len(u.Env) > 0 {
 			c.Env = make([]string, len(u.Env))
 			for j, e := range u.Env {
-				if eq := strings.Index(e, "="); eq >= 0 {
-					c.Env[j] = e[:eq+1] + secretMask
-				} else {
+				eq := strings.Index(e, "=")
+				if eq < 0 {
 					c.Env[j] = e
+					continue
+				}
+				value := e[eq+1:]
+				if strings.HasPrefix(value, "keychain:") {
+					c.Env[j] = e // keep reference visible
+				} else {
+					c.Env[j] = e[:eq+1] + secretMask
 				}
 			}
 		}
@@ -338,6 +347,11 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid config: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	// Clean up keychain entries that were referenced by the old config but
+	// aren't referenced by the new one (upstream removed, env var dropped,
+	// or value swapped to a different keychain ref / plaintext).
+	s.cleanupOrphanedSecrets(currentCfg, &newCfg)
 
 	yamlBytes, err := yaml.Marshal(&newCfg)
 	if err != nil {
@@ -446,6 +460,90 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"tools": result.Tools})
+}
+
+// cleanupOrphanedSecrets deletes keychain entries that the old config
+// referenced but the new config does not. Failures are logged but don't
+// fail the config save — a leftover keychain entry is harmless.
+func (s *Server) cleanupOrphanedSecrets(old, new *config.Config) {
+	if old == nil {
+		return
+	}
+	inUse := make(map[string]bool)
+	collect := func(cfg *config.Config, m map[string]bool) {
+		if cfg == nil {
+			return
+		}
+		for _, u := range cfg.Upstreams {
+			for _, e := range u.Env {
+				eq := strings.Index(e, "=")
+				if eq < 0 {
+					continue
+				}
+				value := e[eq+1:]
+				if strings.HasPrefix(value, "keychain:") {
+					m[strings.TrimPrefix(value, "keychain:")] = true
+				}
+			}
+		}
+	}
+	collect(new, inUse)
+
+	oldRefs := make(map[string]bool)
+	collect(old, oldRefs)
+
+	for ref := range oldRefs {
+		if inUse[ref] {
+			continue
+		}
+		if err := secrets.Delete(ref); err != nil {
+			s.log.Warn("secret_cleanup_failed", "ref", ref, "error", err.Error())
+			continue
+		}
+		s.log.Info("secret_cleaned", "ref", ref)
+	}
+}
+
+// handleSecret writes or removes a secret in the OS keychain. Routes:
+//
+//	POST   /api/secrets/<name>   body: {"value": "..."}   — store
+//	DELETE /api/secrets/<name>                            — remove
+//
+// The stored secret is then referenced from aeolus.yaml as
+// KEY=keychain:<name>; upstream.Start resolves it at spawn time.
+func (s *Server) handleSecret(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/api/secrets/")
+	if name == "" || strings.Contains(name, "/") {
+		http.Error(w, "secret name required", http.StatusBadRequest)
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		var body struct {
+			Value string `json:"value"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if body.Value == "" {
+			http.Error(w, "value is required", http.StatusBadRequest)
+			return
+		}
+		if err := secrets.Set(name, body.Value); err != nil {
+			http.Error(w, "keychain write failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	case http.MethodDelete:
+		if err := secrets.Delete(name); err != nil {
+			http.Error(w, "keychain delete failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // captureBuf is a thread-safe bytes.Buffer for capturing subprocess stderr

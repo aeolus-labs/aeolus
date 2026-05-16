@@ -882,9 +882,20 @@ body {
   line-height: 1;
 }
 
-.btn-icon:hover {
-  border-color: var(--error);
-  color: var(--error);
+.btn-icon:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.btn-icon:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-icon-active {
+  background: rgba(63, 185, 80, 0.12);
+  border-color: var(--success);
+  color: var(--success);
 }
 
 /* Tool picker */
