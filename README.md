@@ -1,16 +1,16 @@
 # Aeolus
 
-A local gateway for Model Context Protocol (MCP) servers.
+A local daemon that gateways every MCP server you use through one dashboard.
 
-Aeolus sits between any MCP client — Claude Code, Cursor, GitHub Copilot, Zed, Continue, your own agent, anything that speaks the protocol — and the MCP servers it wants to call. It aggregates upstream servers, filters which tools each client sees, keeps secrets out of plaintext configs, and ships a live dashboard for inspecting every call.
+Aeolus runs as a long-lived background service on your laptop. It exposes one MCP endpoint (Streamable HTTP + a stdio bridge) that aggregates every MCP server you've configured — filesystem, github, slack, postgres, hosted servers, anything that speaks MCP. Any client — Claude Code, Cursor, GitHub Copilot, Zed, Continue, custom agents — connects to that one endpoint instead of wiring up each MCP server individually.
 
-> Status: **v0.3.7 — alpha.** Single-binary, runs on your laptop.
+> Status: **v0.4.0 — alpha.** Daemon architecture, single-binary, runs on macOS / Linux / Windows.
 
 ## Why
 
-MCP gives agents access to tools, but using it directly leaves three gaps:
+Plain MCP gives you tools but leaves three gaps:
 
-1. **Tool bloat.** Loading every tool from every connected MCP server burns context tokens, raises API bills, and degrades model performance.
+1. **Tool bloat.** Loading every tool from every connected MCP server burns context tokens and degrades model performance.
 2. **No audit trail.** When an agent calls a tool, nobody logs who, what, when, with what arguments.
 3. **No policy.** Any process on your machine can configure any MCP server — including ones that touch production.
 
@@ -26,68 +26,106 @@ Consumer  ─►  filesystem MCP
           ─►  postgres MCP
 ```
 
-With Aeolus, the consumer talks to one endpoint and Aeolus fans out:
+With Aeolus, the consumer talks to one endpoint and the Aeolus daemon fans out:
 
 ```
-Consumer  ─►  Aeolus  ─►  filesystem MCP   (stdio)
-                      ─►  github MCP       (stdio)
-                      ─►  postgres MCP     (stdio)
-                      ─►  example.com/mcp  (http)
+Consumer  ─►  Aeolus daemon  ─►  filesystem MCP   (stdio)
+                             ─►  github MCP       (stdio)
+                             ─►  postgres MCP     (stdio)
+                             ─►  example.com/mcp  (http)
 ```
 
 Aeolus handles:
+
 - **Aggregation** — many MCP servers, one endpoint
 - **Namespacing** — tool names prefixed by upstream (`filesystem.read_file`) so collisions don't happen
 - **Filtering** — allow/deny rules per tool, with globs
 - **Secret management** — env values and HTTP headers can live in the OS keychain, never in YAML
-- **Observability** — every tool call logged; live dashboard at `http://localhost:8765`
-- **Hot reload** — edit `aeolus.yaml` or use the dashboard editor; changes apply without disconnecting the client
+- **Observability** — every tool call logged; dashboard at `http://localhost:8765`
+- **Hot reload** — edit `aeolus.yaml` or use the dashboard editor; changes apply without disconnecting any client
 
-## Quickstart
-
-Requires Go 1.22+ and Node 18+ (Node is only needed to build the dashboard; the resulting binary is self-contained).
+## Install
 
 ```bash
+# Build from source (until binary releases are published)
 git clone https://github.com/aeolus-labs/aeolus.git
 cd aeolus
-make build                                 # React dashboard + Go binary
-cp examples/config.example.yaml aeolus.yaml
-./aeolus --config aeolus.yaml
+make build
+sudo mv ./aeolus /usr/local/bin/
 ```
 
-You should see `dashboard_listening url=http://127.0.0.1:8765` in stderr. Open it — that's the live UI.
+Requires Go 1.22+ and Node 18+ to build. Future releases will be downloadable binaries (and eventually `brew install aeolus-labs/tap/aeolus`).
 
-To make a client use Aeolus, point it at the absolute path of the `aeolus` binary and the absolute path of `aeolus.yaml`. Snippets per client below.
+## First run
 
-## Client setup
+```bash
+# Generate a starter config at ~/.config/aeolus/aeolus.yaml
+aeolus init
 
-All snippets assume `aeolus` is at `/abs/path/to/aeolus` and your config is at `/abs/path/to/aeolus.yaml`.
+# Install the launchd service (macOS)
+aeolus service install
+aeolus service start
 
-### Claude Desktop / Claude Code
+# Open the dashboard
+aeolus open
+```
 
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (Claude Code uses a per-project equivalent via `claude mcp add aeolus <path>`):
+The dashboard pops up at `http://localhost:8765`. Use it to add your first MCP server (Servers tab → Catalog or `+ Add upstream`). Changes apply immediately — no daemon restart needed.
+
+To check status:
+
+```bash
+aeolus service status   # running | loaded, not running | not loaded
+aeolus service logs -f  # tail the daemon's stderr
+```
+
+To remove:
+
+```bash
+aeolus service uninstall
+```
+
+If you'd rather run the daemon in the foreground (no launchd):
+
+```bash
+aeolus  # reads ~/.config/aeolus/aeolus.yaml by default
+```
+
+## Connect your MCP client
+
+The same snippet works for any MCP client that supports stdio (Claude Desktop, Claude Code, Cursor, GitHub Copilot, Zed, Continue, custom agents). The `aeolus mcp` subcommand is a stdio shim that forwards to the running daemon.
+
+### Claude Desktop
+
+`~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
     "aeolus": {
-      "command": "/abs/path/to/aeolus",
-      "args": ["--config", "/abs/path/to/aeolus.yaml"]
+      "command": "aeolus",
+      "args": ["mcp"]
     }
   }
 }
 ```
 
+### Claude Code
+
+```bash
+claude mcp add aeolus aeolus -- mcp
+```
+
 ### Cursor
 
-Edit `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` in your project root:
+`~/.cursor/mcp.json` (or `.cursor/mcp.json` in a project):
 
 ```json
 {
   "mcpServers": {
     "aeolus": {
-      "command": "/abs/path/to/aeolus",
-      "args": ["--config", "/abs/path/to/aeolus.yaml"]
+      "command": "aeolus",
+      "args": ["mcp"]
     }
   }
 }
@@ -95,15 +133,15 @@ Edit `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` in your project root:
 
 ### GitHub Copilot (VS Code)
 
-Add to `.vscode/mcp.json` in your workspace or VS Code user settings:
+`.vscode/mcp.json`:
 
 ```json
 {
   "servers": {
     "aeolus": {
       "type": "stdio",
-      "command": "/abs/path/to/aeolus",
-      "args": ["--config", "/abs/path/to/aeolus.yaml"]
+      "command": "aeolus",
+      "args": ["mcp"]
     }
   }
 }
@@ -111,15 +149,15 @@ Add to `.vscode/mcp.json` in your workspace or VS Code user settings:
 
 ### Zed
 
-In `~/.config/zed/settings.json`:
+`~/.config/zed/settings.json`:
 
 ```json
 {
   "context_servers": {
     "aeolus": {
       "command": {
-        "path": "/abs/path/to/aeolus",
-        "args": ["--config", "/abs/path/to/aeolus.yaml"]
+        "path": "aeolus",
+        "args": ["mcp"]
       }
     }
   }
@@ -128,7 +166,7 @@ In `~/.config/zed/settings.json`:
 
 ### Continue.dev
 
-In `~/.continue/config.json`:
+`~/.continue/config.json`:
 
 ```json
 {
@@ -137,8 +175,8 @@ In `~/.continue/config.json`:
       {
         "transport": {
           "type": "stdio",
-          "command": "/abs/path/to/aeolus",
-          "args": ["--config", "/abs/path/to/aeolus.yaml"]
+          "command": "aeolus",
+          "args": ["mcp"]
         }
       }
     ]
@@ -146,25 +184,26 @@ In `~/.continue/config.json`:
 }
 ```
 
-### Custom agent (Anthropic / OpenAI / local model)
+### Custom agent (Anthropic / OpenAI SDK / local model)
 
-Aeolus is just an MCP server itself. Spawn it like any other and let your agent SDK do the rest. With the official `@modelcontextprotocol/sdk` (TS):
+Two options:
+
+**A. Spawn the stdio bridge** (same shape as the snippets above) — works with any MCP client SDK.
+
+**B. Connect directly over HTTP** — Aeolus serves Streamable HTTP at `http://localhost:8765/mcp`:
 
 ```ts
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 
-const transport = new StdioClientTransport({
-  command: '/abs/path/to/aeolus',
-  args: ['--config', '/abs/path/to/aeolus.yaml'],
-})
+const transport = new StreamableHTTPClientTransport(new URL('http://localhost:8765/mcp'))
 const client = new Client({ name: 'my-agent', version: '0.1.0' })
 await client.connect(transport)
 ```
 
 ## Configuration
 
-`aeolus.yaml` describes upstreams, tool rules, logging, and dashboard settings.
+`~/.config/aeolus/aeolus.yaml` describes the upstream servers, tool rules, logging, and dashboard settings.
 
 ```yaml
 upstreams:
@@ -186,9 +225,9 @@ upstreams:
 
 tools:
   allow:
-    - filesystem.read_*    # only filesystem read operations
-    - github.list_*        # and read-only GitHub queries
-    - hosted.*             # everything from the hosted server
+    - filesystem.read_*
+    - github.list_*
+    - hosted.*
   deny:
     - filesystem.read_media_*
 
@@ -203,71 +242,67 @@ dashboard:
 
 ### Transports
 
-- **stdio** (default) — Aeolus spawns the MCP server as a subprocess and talks over stdin/stdout. Best for npm/pip-distributed MCP servers.
-- **http** — Aeolus POSTs JSON-RPC to a Streamable HTTP endpoint per the MCP spec. Best for hosted MCP servers. Set `url:` and optional `headers:`.
+- **stdio** (default) — Aeolus spawns the MCP server as a subprocess.
+- **http** — Aeolus POSTs JSON-RPC to a Streamable HTTP endpoint per the MCP spec.
 
 ### Secrets in the keychain
 
-Any value in `env:` or `headers:` can be `keychain:<name>`. Aeolus resolves it from the OS keychain (macOS Keychain, Windows Credential Manager, libsecret on Linux) at spawn time. The actual secret never lives in `aeolus.yaml`. The dashboard's "🔓 lock" toggle stores values into the keychain on save.
+Any value in `env:` or `headers:` can be `keychain:<name>`. Aeolus resolves it from the OS keychain (macOS Keychain, Windows Credential Manager, libsecret on Linux) at spawn time. The actual secret never lives in `aeolus.yaml`. The dashboard's 🔓 toggle stores values into the keychain on save.
 
 ### Hot reload
 
-Edits to `aeolus.yaml` (by hand or by the dashboard) are picked up immediately — Aeolus reloads the proxy without disconnecting the client. Invalid configs are logged and ignored; the previous good config keeps running.
+Edits to `aeolus.yaml` (by hand or through the dashboard) are picked up immediately. Connected clients get a `tools/list_changed` notification so they refresh. Invalid configs are logged and ignored — the previous good config keeps running.
 
 ## The dashboard
 
-Visit `http://localhost:8765`.
+Visit `http://localhost:8765` (or run `aeolus open`).
 
-- **Live** tab — every tool call streamed in real time: time, upstream, tool name, latency, status. Filter by tool name, upstream, status. Top-N per-tool stats with p50/p95 latencies.
-- **Settings** tab — connected upstreams with per-upstream Setup / Tools views; an Add / Edit / Remove flow that probes new servers before saving; a Catalog browser of ~2,600 MCP servers from the official MCP Registry, filterable by transport / auth / source.
+- **Servers** tab: connected upstreams with per-upstream Setup / Tools views; Add / Edit / Remove flow that probes new servers before saving; Catalog browser of ~2,600 MCP servers from the official MCP Registry, filterable by transport and auth.
+- **Live** tab: every tool call streamed in real time — time, upstream, tool, latency, status — with filters and per-tool stats (p50/p95).
 
-## Tool name namespacing
-
-Aeolus prefixes every upstream tool with the upstream name:
+## CLI reference
 
 ```
-filesystem  →  filesystem.read_file, filesystem.write_file, ...
-github      →  github.create_issue, github.list_repos, ...
-```
+aeolus                       run as a daemon (foreground)
+aeolus service install       write the launchd plist
+aeolus service start         start the daemon as a launchd agent
+aeolus service stop          stop the daemon
+aeolus service status        running / not running
+aeolus service restart       stop + start
+aeolus service uninstall     stop + remove plist
+aeolus service logs [-f]     tail the daemon's stderr
 
-Two upstreams with a tool named `read_file` don't collide. Filter rules like `github.delete_*` match all destructive GitHub operations.
+aeolus mcp                   stdio bridge for MCP clients (see snippets above)
+aeolus open                  open dashboard in default browser
+aeolus init                  write a starter aeolus.yaml
+aeolus --version             print version
+aeolus --help                full help
+```
 
 ## Repo layout
 
 ```
 aeolus/
-├── cmd/aeolus/             Go entry point
+├── cmd/aeolus/             Go entry point (daemon, mcp bridge, service, open, init)
 ├── internal/
 │   ├── mcp/                JSON-RPC + MCP types
-│   ├── config/             YAML loader
-│   ├── upstream/           stdio + http server impls
-│   ├── proxy/              aggregation, filtering, hot reload, observer
+│   ├── config/             YAML loader + validation
+│   ├── upstream/           stdio + http upstream server impls
+│   ├── proxy/              Engine (long-lived state), Proxy (stdio adapter)
 │   ├── secrets/            OS keychain wrapper
 │   ├── watcher/            aeolus.yaml file watcher
-│   └── dashboard/          HTTP + SSE; registry catalog; embedded React build
+│   └── dashboard/          HTTP + SSE; embedded React build; /mcp endpoint
 ├── dashboard/              React source (Vite + TypeScript)
 ├── examples/               sample configs
 └── Makefile                build orchestration
 ```
 
-## v0.3.x checklist
-
-- [x] Multi-upstream proxy with namespaced tool names
-- [x] Tool filtering (allow / deny, globs)
-- [x] Embedded React dashboard with live SSE feed
-- [x] Dashboard-driven config editor with hot reload
-- [x] Probe-before-save flow for new upstreams
-- [x] Catalog from the official MCP Registry (~2,600 entries) with search and filters
-- [x] OS keychain integration for env + header secrets
-- [x] HTTP transport for upstreams
-- [x] File watcher for hand-edits to `aeolus.yaml`
-
 ## What's next
 
-- Catalog quality — surface known-bad / non-runnable entries
-- First-run experience — `aeolus init` and dashboard onboarding
-- Better error messages across the API
-- Distribution — binary releases and Homebrew tap
+- macOS `.app` bundle so a Dock icon launches the dashboard.
+- Linux systemd / Windows service equivalents to `aeolus service`.
+- Auto-update path for installed daemons.
+- Distribution: binary releases on GitHub + Homebrew tap.
 
 ## License
 

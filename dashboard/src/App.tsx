@@ -73,7 +73,7 @@ export default function App() {
       <header className="header">
         <div className="brand">
           <span className="logo">Aeolus</span>
-          <span className="version">v0.3.10-dev</span>
+          <span className="version">v0.4.0-dev</span>
           <span className={`conn conn-${connected ? 'on' : 'off'}`}>
             {connected ? 'live' : 'disconnected'}
           </span>

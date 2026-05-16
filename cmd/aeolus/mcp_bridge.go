@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -10,34 +11,49 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
 
 // handleMCPBridge runs the stdio↔HTTP bridge. MCP clients that don't yet
 // speak Streamable HTTP (or that the user wants to launch with a plain
-// command path) spawn `aeolus mcp` as their MCP server. This bridge
-// forwards line-delimited JSON-RPC from stdin to the running daemon's
-// /mcp endpoint and writes responses back to stdout.
+// command path) spawn `aeolus mcp` as their MCP server. The bridge does
+// two things at once:
 //
-// Today the bridge is one POST per request. A future revision can also
-// hold a GET open to the daemon to forward server-initiated
-// notifications (tools/list_changed, etc.) back to the client.
+//   - Forwards line-delimited JSON-RPC from stdin to the daemon's /mcp
+//     endpoint (one POST per request) and writes the response to stdout.
+//   - Once a session id is established, holds a long-lived GET open to
+//     /mcp and pipes every server-initiated notification (especially
+//     `notifications/tools/list_changed`) back to stdout so the client
+//     can refresh without reconnecting.
 func handleMCPBridge(args []string) {
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
 	daemonURL := fs.String("daemon", "http://localhost:8765/mcp", "URL of the running aeolus daemon's MCP endpoint")
 	timeout := fs.Duration("timeout", 5*time.Minute, "per-request timeout")
 	_ = fs.Parse(args)
 
-	client := &http.Client{Timeout: *timeout}
+	postClient := &http.Client{Timeout: *timeout}
+	sseClient := &http.Client{} // long-lived, no timeout
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	var (
-		sessMu sync.Mutex
-		sessID string
+		sessMu     sync.Mutex
+		sessID     string
+		sseStarted bool
+
+		outMu sync.Mutex
 	)
 
+	writeOut := func(data []byte) error {
+		outMu.Lock()
+		defer outMu.Unlock()
+		return writeNDJSON(os.Stdout, data)
+	}
+
 	stdin := bufio.NewReaderSize(os.Stdin, 1<<20)
-	out := os.Stdout
 
 	for {
 		line, err := readNDJSONLine(stdin)
@@ -52,7 +68,7 @@ func handleMCPBridge(args []string) {
 			continue
 		}
 
-		req, err := http.NewRequest(http.MethodPost, *daemonURL, bytes.NewReader(line))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, *daemonURL, bytes.NewReader(line))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "aeolus mcp: build request:", err)
 			os.Exit(1)
@@ -66,16 +82,23 @@ func handleMCPBridge(args []string) {
 		}
 		sessMu.Unlock()
 
-		resp, err := client.Do(req)
+		resp, err := postClient.Do(req)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "aeolus mcp: post to daemon:", err)
 			os.Exit(1)
 		}
 
+		// Capture the session id from the initialize response and, the
+		// first time we see one, kick off the SSE listener.
 		if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
 			sessMu.Lock()
 			sessID = sid
+			start := !sseStarted
+			sseStarted = true
 			sessMu.Unlock()
+			if start {
+				go runSSE(ctx, sseClient, *daemonURL, sid, writeOut)
+			}
 		}
 
 		switch {
@@ -89,7 +112,7 @@ func handleMCPBridge(args []string) {
 				fmt.Fprintln(os.Stderr, "aeolus mcp: read response:", readErr)
 				os.Exit(1)
 			}
-			if err := writeNDJSON(out, body); err != nil {
+			if err := writeOut(body); err != nil {
 				fmt.Fprintln(os.Stderr, "aeolus mcp: write stdout:", err)
 				os.Exit(1)
 			}
@@ -100,14 +123,92 @@ func handleMCPBridge(args []string) {
 				"aeolus mcp: daemon responded %s: %s\n",
 				resp.Status, bytes.TrimSpace(body),
 			)
-			// Try to surface an MCP-style error response to the client so the
-			// MCP client doesn't hang. Best-effort.
 			if id := extractID(line); id != nil {
 				rpcErr := mcpErrorPayload(id, -32000, fmt.Sprintf("Aeolus daemon error: %s", resp.Status))
-				_ = writeNDJSON(out, rpcErr)
+				_ = writeOut(rpcErr)
 			}
 		}
 	}
+}
+
+// runSSE holds a long-lived GET open to the daemon's MCP endpoint and
+// forwards each server-initiated JSON-RPC notification it receives to
+// stdout as NDJSON. The stream gets reconnected with exponential backoff
+// if the daemon restarts or the connection drops.
+func runSSE(ctx context.Context, client *http.Client, daemonURL, sessID string, writeOut func([]byte) error) {
+	backoff := time.Second
+	for {
+		err := streamSSE(ctx, client, daemonURL, sessID, writeOut)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "aeolus mcp: notification stream:", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
+// streamSSE opens GET /mcp and parses the daemon's SSE event stream,
+// writing each `data:` payload to stdout via writeOut. Returns when the
+// stream ends or the context is cancelled.
+func streamSSE(ctx context.Context, client *http.Client, daemonURL, sessID string, writeOut func([]byte) error) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, daemonURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Mcp-Session-Id", sessID)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("daemon %s", resp.Status)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64<<10), 4<<20)
+
+	var data strings.Builder
+	flush := func() {
+		if data.Len() == 0 {
+			return
+		}
+		payload := strings.TrimRight(data.String(), "\n")
+		data.Reset()
+		if payload == "" {
+			return
+		}
+		if err := writeOut([]byte(payload)); err != nil {
+			fmt.Fprintln(os.Stderr, "aeolus mcp: write notification:", err)
+		}
+	}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		switch {
+		case line == "":
+			flush()
+		case strings.HasPrefix(line, ":"):
+			// Comment / heartbeat line — ignore.
+		case strings.HasPrefix(line, "data:"):
+			data.WriteString(strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
+			data.WriteByte('\n')
+		default:
+			// Other SSE fields (event:, id:, retry:) — ignore.
+		}
+	}
+	return scanner.Err()
 }
 
 // readNDJSONLine reads one JSON object terminated by '\n' from r.

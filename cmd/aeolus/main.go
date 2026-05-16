@@ -64,6 +64,12 @@ func main() {
 		case "mcp":
 			handleMCPBridge(os.Args[2:])
 			return
+		case "open":
+			handleOpen(os.Args[2:])
+			return
+		case "service":
+			handleService(os.Args[2:])
+			return
 		case "help", "--help", "-h":
 			printUsage()
 			return
@@ -71,8 +77,9 @@ func main() {
 	}
 
 	var (
-		showVersion = flag.Bool("version", false, "print version and exit")
-		configPath  = flag.String("config", "", "path to config file")
+		showVersion   = flag.Bool("version", false, "print version and exit")
+		configPath    = flag.String("config", "", "path to config file (default: ~/.config/aeolus/aeolus.yaml)")
+		dashboardPort = flag.Int("dashboard-port", 0, "override the dashboard port from config")
 	)
 	flag.Parse()
 
@@ -88,49 +95,98 @@ func main() {
 		fmt.Printf("aeolus %s%s\n", version, extra)
 		return
 	}
-	if *configPath == "" {
-		fmt.Fprintln(os.Stderr, "error: --config is required (or run `aeolus init` to create one)")
+
+	resolved, err := resolveConfigPath(*configPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "aeolus:", err)
 		os.Exit(2)
 	}
 
-	if err := run(*configPath); err != nil {
+	if err := run(resolved, *dashboardPort); err != nil {
 		fmt.Fprintln(os.Stderr, "aeolus:", err)
 		os.Exit(1)
 	}
+}
+
+// resolveConfigPath picks a config file location with this precedence:
+//  1. explicit --config flag
+//  2. $AEOLUS_CONFIG env var
+//  3. ~/.config/aeolus/aeolus.yaml (or $XDG_CONFIG_HOME/aeolus/aeolus.yaml)
+//  4. ./aeolus.yaml in the current directory
+//
+// Returns an error suggesting `aeolus init` when nothing exists.
+func resolveConfigPath(flagValue string) (string, error) {
+	if flagValue != "" {
+		return flagValue, nil
+	}
+	if env := os.Getenv("AEOLUS_CONFIG"); env != "" {
+		return env, nil
+	}
+	candidates := []string{defaultConfigPath(), "aeolus.yaml"}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c, nil
+		}
+	}
+	return "", fmt.Errorf("no config found at %s or ./aeolus.yaml — run `aeolus init` to create one (or pass --config)", defaultConfigPath())
+}
+
+// defaultConfigPath returns the XDG-style canonical config location.
+func defaultConfigPath() string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "aeolus", "aeolus.yaml")
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".config", "aeolus", "aeolus.yaml")
+	}
+	return "aeolus.yaml"
 }
 
 func printUsage() {
 	fmt.Print(`Aeolus — local gateway for MCP servers.
 
 Usage:
-  aeolus --config <path>    run as a daemon (dashboard + HTTP MCP endpoint)
+  aeolus [flags]            run as a daemon (dashboard + HTTP MCP endpoint)
+  aeolus service <cmd>      install/start/stop/status/uninstall (macOS launchd)
   aeolus mcp [flags]        stdio bridge to a running daemon (for MCP clients
                             that don't support HTTP transport)
+  aeolus open [flags]       open the dashboard in your default browser
   aeolus init [flags]       write a starter aeolus.yaml
   aeolus --version          print version
   aeolus --help             this help
 
 Daemon flags:
-  --config <path>           path to aeolus.yaml (required)
+  --config <path>           path to aeolus.yaml
+                            (default: $AEOLUS_CONFIG, ~/.config/aeolus/aeolus.yaml,
+                             or ./aeolus.yaml)
+  --dashboard-port <port>   override the dashboard port from config
 
 mcp bridge flags:
   --daemon <url>            URL of running daemon's MCP endpoint
                             (default: http://localhost:8765/mcp)
 
+open flags:
+  --config <path>           same lookup as the daemon
+
 Init flags:
-  --path <path>             where to write the config (default: aeolus.yaml)
+  --path <path>             where to write the config
+                            (default: ~/.config/aeolus/aeolus.yaml)
   --force                   overwrite an existing file
 `)
 }
 
 func handleInit(args []string) {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
-	path := fs.String("path", "aeolus.yaml", "where to write the config")
+	path := fs.String("path", defaultConfigPath(), "where to write the config")
 	force := fs.Bool("force", false, "overwrite an existing file")
 	_ = fs.Parse(args)
 
 	if _, err := os.Stat(*path); err == nil && !*force {
 		fmt.Fprintf(os.Stderr, "error: %s already exists. Use --force to overwrite.\n", *path)
+		os.Exit(1)
+	}
+	if err := os.MkdirAll(filepath.Dir(*path), 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, "aeolus init: couldn't create parent directory:", err)
 		os.Exit(1)
 	}
 	if err := os.WriteFile(*path, []byte(starterConfig), 0o600); err != nil {
@@ -139,18 +195,22 @@ func handleInit(args []string) {
 	}
 
 	abs, _ := filepath.Abs(*path)
+	self := findSelfPath()
 	fmt.Printf("Created %s\n\n", *path)
 	fmt.Println("Next steps:")
-	fmt.Printf("  1. Run: aeolus --config %s\n", *path)
-	fmt.Println("  2. Open: http://localhost:8765")
-	fmt.Println("  3. In the Settings tab, click + Add upstream or browse the Catalog")
+	fmt.Println("  1. Run: aeolus")
+	fmt.Println("  2. Open: aeolus open  (or visit http://localhost:8765)")
+	fmt.Println("  3. In the Servers tab, click + Add upstream or browse the Catalog")
 	fmt.Println("     to wire up your first MCP server.")
 	fmt.Println()
 	fmt.Println("Point your MCP client (Claude Code, Cursor, Copilot, Zed, etc.) at:")
-	fmt.Printf("  command: %s\n", findSelfPath())
-	fmt.Printf("  args:    [\"--config\", %q]\n", abs)
+	fmt.Printf("  command: %s\n", self)
+	fmt.Println("  args:    [\"mcp\"]")
 	fmt.Println()
-	fmt.Println("See README.md for client setup snippets.")
+	fmt.Printf("(Behind the scenes, `%s mcp` forwards stdio to the daemon listening on the\n", self)
+	fmt.Printf(" dashboard port. The daemon reads its config from %s.)\n", abs)
+	fmt.Println()
+	fmt.Println("See README.md for per-client snippets.")
 }
 
 func findSelfPath() string {
@@ -169,10 +229,16 @@ func findSelfPath() string {
 // upstream pool. It blocks until ctx is canceled (Ctrl+C / SIGTERM).
 // MCP clients connect either over HTTP at /mcp directly, or via the
 // `aeolus mcp` stdio bridge for clients that only support stdio.
-func run(configPath string) error {
+//
+// dashboardPort > 0 overrides cfg.Dashboard.Addr's port from the CLI.
+func run(configPath string, dashboardPort int) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
+	}
+	if dashboardPort > 0 {
+		cfg.Dashboard.Addr = fmt.Sprintf("localhost:%d", dashboardPort)
+		cfg.Dashboard.Enabled = true
 	}
 
 	logger := newLogger(cfg.Log)
