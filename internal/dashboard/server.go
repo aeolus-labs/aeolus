@@ -20,6 +20,7 @@ import (
 
 	"github.com/aeolus-labs/aeolus/internal/config"
 	"github.com/aeolus-labs/aeolus/internal/mcp"
+	"github.com/aeolus-labs/aeolus/internal/proxy"
 	"github.com/aeolus-labs/aeolus/internal/secrets"
 	"github.com/aeolus-labs/aeolus/internal/upstream"
 	"gopkg.in/yaml.v3"
@@ -78,6 +79,10 @@ type McpEngine interface {
 	CallTool(ctx context.Context, name string, arguments json.RawMessage, client, workspace string) *mcp.Message
 	SubscribeToolsChanged() (<-chan struct{}, func())
 	ShuttingDown() <-chan struct{}
+	// FailedUpstreams returns name/error pairs for upstreams that
+	// couldn't be initialized or refreshed. The dashboard surfaces
+	// these as broken-server badges and a banner.
+	FailedUpstreams() []proxy.UpstreamFailure
 }
 
 // mcpSession holds per-MCP-client state. Currently minimal; sessions

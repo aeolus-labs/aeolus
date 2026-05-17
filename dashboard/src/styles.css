@@ -1744,6 +1744,61 @@ body {
   border-radius: 6px;
 }
 
+/* Args/Response header row: label + copy button. */
+.call-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.call-detail-copy {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.call-detail-copy:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Truncation banner shown above the JSON when the engine had to cap
+   the payload at 16 KiB. */
+.call-detail-truncated {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 4px 0;
+}
+
+/* JSON syntax highlighting. Subtle palette — keys clearly leading,
+   strings/numbers separated. */
+.json-key {
+  color: #79c0ff;
+}
+
+.json-string {
+  color: #a5d6ff;
+}
+
+.json-number {
+  color: #d2a8ff;
+}
+
+.json-bool {
+  color: #ffa657;
+}
+
+.json-null {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 .client-cell {
   font-family: var(--mono);
   font-size: 12px;
@@ -2344,6 +2399,107 @@ body {
   font-size: 12px;
   color: var(--text-muted);
   text-align: center;
+}
+
+/* Failure banner at the top of the Servers tab when one or more
+   upstreams can't be initialized. Each line names the upstream and
+   shows the engine's error message with a per-upstream Reconnect
+   button. */
+
+.failure-banner {
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid var(--error, #f87171);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin: 8px 0 16px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.failure-banner-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.failure-banner-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--error, #f87171);
+  color: #fff;
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.failure-banner-list {
+  margin: 0;
+  padding-left: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.failure-banner-list li {
+  color: var(--text-muted);
+  word-break: break-word;
+}
+
+.failure-banner-list code {
+  color: var(--text);
+  margin-right: 4px;
+}
+
+.failure-banner-retry {
+  margin-left: 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  padding: 1px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.failure-banner-retry:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* "broken" pill in the server card header. Reuses .badge styling plus
+   danger color from .badge-danger; this rule just spaces it. */
+.broken-pill {
+  margin-left: 2px;
+}
+
+/* Per-card failure block inside the Setup tab — surfaces the engine's
+   error message right where the user is troubleshooting. */
+.card-failure {
+  background: rgba(248, 113, 113, 0.06);
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+}
+
+.card-failure-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--error, #f87171);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.card-failure-msg {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  word-break: break-word;
 }
 
 /* Scope pill — single "scoped" indicator on the server card when an

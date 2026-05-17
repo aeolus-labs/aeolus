@@ -510,29 +510,122 @@ function CallRow(props: { event: ToolCallEvent; open: boolean; onToggle: () => v
 function CallDetail({ event }: { event: ToolCallEvent }) {
   return (
     <div className="call-detail">
-      <div className="call-detail-section">
-        <div className="call-detail-label">Arguments</div>
-        <JsonView value={event.arguments} />
-      </div>
-      <div className="call-detail-section">
-        <div className="call-detail-label">Response</div>
-        <JsonView value={event.response} />
-      </div>
+      <CallDetailSection label="Arguments" value={event.arguments} />
+      <CallDetailSection label="Response" value={event.response} />
     </div>
   )
 }
 
-function JsonView({ value }: { value: unknown }) {
+function CallDetailSection({ label, value }: { label: string; value: unknown }) {
+  const [copied, setCopied] = useState(false)
+
   if (value === undefined || value === null) {
-    return <div className="call-detail-empty">— not recorded —</div>
+    return (
+      <div className="call-detail-section">
+        <div className="call-detail-header">
+          <span className="call-detail-label">{label}</span>
+        </div>
+        <div className="call-detail-empty">— not recorded —</div>
+      </div>
+    )
   }
-  let text: string
+
+  const text = stringifyJson(value)
+  const truncated = isTruncatedPayload(value)
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1200)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return (
+    <div className="call-detail-section">
+      <div className="call-detail-header">
+        <span className="call-detail-label">{label}</span>
+        <button
+          type="button"
+          className="call-detail-copy"
+          onClick={copy}
+          title={`Copy ${label.toLowerCase()} JSON to clipboard`}
+        >
+          {copied ? '✓ Copied' : 'Copy'}
+        </button>
+      </div>
+      {truncated && (
+        <div className="call-detail-truncated">
+          Truncated — Aeolus caps recorded payloads at 16 KiB
+          {truncated.original ? ` (original was ${truncated.original} bytes)` : ''}.
+        </div>
+      )}
+      <pre className="call-detail-json">
+        <HighlightedJson text={text} />
+      </pre>
+    </div>
+  )
+}
+
+function stringifyJson(value: unknown): string {
   try {
-    text = JSON.stringify(value, null, 2)
+    return JSON.stringify(value, null, 2)
   } catch {
-    text = String(value)
+    return String(value)
   }
-  return <pre className="call-detail-json">{text}</pre>
+}
+
+// isTruncatedPayload recognizes the placeholder shape the engine emits
+// when args/response are larger than the 16 KiB cap. Returns the
+// original byte count if present so the UI can name it.
+function isTruncatedPayload(value: unknown): { original?: number } | null {
+  if (
+    value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    '_truncated' in (value as Record<string, unknown>) &&
+    (value as { _truncated: unknown })._truncated === true
+  ) {
+    const orig = (value as { original_bytes?: number }).original_bytes
+    return { original: typeof orig === 'number' ? orig : undefined }
+  }
+  return null
+}
+
+// HighlightedJson colors a pretty-printed JSON string by token type
+// (key, string, number, boolean, null). Single regex pass, no
+// library. Stable enough for our payloads — the cases where the
+// regex misclassifies are degenerate strings that contain unescaped
+// quotes, which shouldn't happen in JSON.stringify output.
+const JSON_TOKEN = /("(?:\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g
+
+function HighlightedJson({ text }: { text: string }) {
+  const out: React.ReactNode[] = []
+  let last = 0
+  let m: RegExpExecArray | null
+  let i = 0
+  while ((m = JSON_TOKEN.exec(text)) !== null) {
+    if (m.index > last) out.push(text.slice(last, m.index))
+    const tok = m[1]
+    let cls = 'json-number'
+    if (tok.startsWith('"')) {
+      cls = m[2] ? 'json-key' : 'json-string'
+    } else if (tok === 'true' || tok === 'false') {
+      cls = 'json-bool'
+    } else if (tok === 'null') {
+      cls = 'json-null'
+    }
+    out.push(
+      <span key={i++} className={cls}>
+        {tok}
+      </span>,
+    )
+    last = m.index + tok.length
+  }
+  if (last < text.length) out.push(text.slice(last))
+  return <>{out}</>
 }
 
 type ToolStats = {

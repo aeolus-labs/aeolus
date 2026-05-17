@@ -42,9 +42,35 @@ export default function Settings() {
   const [showSnippet, setShowSnippet] = useState(false)
   const [showAddExisting, setShowAddExisting] = useState(false)
   const [showGlobalSnippet, setShowGlobalSnippet] = useState(false)
+  // Map of upstream name → failure message for any upstream the
+  // engine couldn't initialize (or whose tools failed to refresh).
+  // Polled every 5s and refreshed after each mutation.
+  const [failures, setFailures] = useState<Record<string, string>>({})
 
   useEffect(() => {
     api.config().then(setConfig).catch((err) => setError(err.message))
+  }, [])
+
+  // Refresh the failure map. Called on mount, on a 5s poll, and after
+  // any mutation that might fix or surface new failures (toggle,
+  // reconnect, save).
+  async function refreshFailures() {
+    try {
+      const r = await fetch('/api/upstreams/failures')
+      if (!r.ok) return
+      const data = (await r.json()) as { failures?: { name: string; error: string }[] }
+      const map: Record<string, string> = {}
+      for (const f of data.failures ?? []) map[f.name] = f.error
+      setFailures(map)
+    } catch {
+      /* ignore — keep last known map */
+    }
+  }
+
+  useEffect(() => {
+    refreshFailures()
+    const t = setInterval(refreshFailures, 5000)
+    return () => clearInterval(t)
   }, [])
 
   useEffect(() => {
@@ -184,6 +210,9 @@ export default function Settings() {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setReconnecting(null)
+      // Immediate refresh so the broken badge / banner reflects the
+      // new state without waiting for the next poll tick.
+      void refreshFailures()
     }
   }
 
@@ -199,6 +228,9 @@ export default function Settings() {
       if (!r.ok) throw new Error(await r.text())
       const saved = (await r.json()) as AeolusConfig
       setConfig(saved)
+      // A config save triggers a daemon reload, which may surface
+      // new failures (bad command, expired token) or clear old ones.
+      void refreshFailures()
       return saved
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err))
@@ -365,6 +397,13 @@ export default function Settings() {
 
       <TourController />
 
+      {Object.keys(failures).length > 0 && (
+        <FailureBanner failures={failures} onReconnect={(name) => {
+          const u = config.upstreams.find((x) => x.name === name)
+          if (u) reconnectUpstream(u)
+        }} />
+      )}
+
       <nav className="subtabs">
         <button
           className={`subtab ${settingsTab === 'upstreams' ? 'subtab-active' : ''}`}
@@ -461,6 +500,7 @@ export default function Settings() {
                   denyList={denyList}
                   inWorkspaces={workspaceMembershipsFor(u.name)}
                   scopedToWorkspace={activeWorkspace?.name ?? null}
+                  failure={failures[u.name]}
                   onEdit={() => setEditing(u)}
                   onRemove={() => removeUpstream(u)}
                   onRemoveFromWorkspace={async () => {
@@ -625,6 +665,7 @@ function UpstreamCard({
   denyList,
   inWorkspaces,
   scopedToWorkspace,
+  failure,
   onEdit,
   onRemove,
   onRemoveFromWorkspace,
@@ -641,6 +682,7 @@ function UpstreamCard({
   denyList: string[]
   inWorkspaces: string[]
   scopedToWorkspace: string | null
+  failure?: string
   onEdit: () => void
   onRemove: () => void
   onRemoveFromWorkspace: () => void
@@ -672,6 +714,14 @@ function UpstreamCard({
       <div className="card-header">
         <span className="card-title">{upstream.name}</span>
         <span className="badge">{transport}</span>
+        {failure && (
+          <span
+            className="badge badge-danger broken-pill"
+            title={failure}
+          >
+            broken
+          </span>
+        )}
         {inWorkspaces.length > 0 && (
           <span
             className="scope-pill"
@@ -716,6 +766,12 @@ function UpstreamCard({
       <div className="card-body">
         {tab === 'setup' && (
           <>
+            {failure && (
+              <div className="card-failure">
+                <div className="card-failure-label">Last error</div>
+                <code className="card-failure-msg">{failure}</code>
+              </div>
+            )}
             {transport === 'stdio' ? (
               <>
                 <Row label="command" value={upstream.command ?? '—'} mono />
@@ -951,6 +1007,44 @@ function Row({ label, value, mono = false }: { label: string; value: string; mon
     <div className="row">
       <span className="row-label">{label}</span>
       <span className={`row-value ${mono ? 'mono' : ''}`}>{value}</span>
+    </div>
+  )
+}
+
+// FailureBanner is shown at the top of the Servers tab whenever the
+// engine reports one or more upstreams that couldn't be initialized
+// or refreshed. Click an entry's Reconnect button to retry that
+// specific upstream without touching the others.
+function FailureBanner({
+  failures,
+  onReconnect,
+}: {
+  failures: Record<string, string>
+  onReconnect: (name: string) => void
+}) {
+  const names = Object.keys(failures)
+  return (
+    <div className="failure-banner">
+      <div className="failure-banner-head">
+        <span className="failure-banner-icon" aria-hidden="true">!</span>
+        <strong>
+          {names.length} upstream{names.length === 1 ? '' : 's'} not running
+        </strong>
+      </div>
+      <ul className="failure-banner-list">
+        {names.map((n) => (
+          <li key={n}>
+            <code className="mono">{n}</code>: {failures[n]}
+            <button
+              className="failure-banner-retry"
+              onClick={() => onReconnect(n)}
+              title={`Retry connecting to ${n}`}
+            >
+              Reconnect
+            </button>
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }

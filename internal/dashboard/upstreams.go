@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 )
@@ -17,6 +18,11 @@ func (s *Server) handleUpstream(w http.ResponseWriter, r *http.Request) {
 	}
 	parts := strings.SplitN(rest, "/", 2)
 	if len(parts) < 2 {
+		// Allow /api/upstreams/failures (no name segment).
+		if rest == "failures" {
+			s.handleUpstreamFailures(w, r)
+			return
+		}
 		http.NotFound(w, r)
 		return
 	}
@@ -36,6 +42,26 @@ func (s *Server) handleUpstream(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// handleUpstreamFailures returns the engine's current list of
+// upstreams that failed to initialize or refresh. The dashboard polls
+// this to surface broken-server badges + a banner.
+func (s *Server) handleUpstreamFailures(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET required", http.StatusMethodNotAllowed)
+		return
+	}
+	s.cfgMu.RLock()
+	eng := s.engine
+	s.cfgMu.RUnlock()
+	w.Header().Set("Content-Type", "application/json")
+	if eng == nil {
+		// Daemon-mode build wires the engine; older builds don't.
+		_, _ = w.Write([]byte(`{"failures":[]}`))
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"failures": eng.FailedUpstreams()})
 }
 
 func (s *Server) handleUpstreamReconnect(w http.ResponseWriter, r *http.Request, name string) {
