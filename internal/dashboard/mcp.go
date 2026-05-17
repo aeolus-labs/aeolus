@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/aeolus-labs/aeolus/internal/mcp"
@@ -73,7 +74,7 @@ func (s *Server) handleMCPPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := s.routeMCPRequest(r.Context(), &msg)
+	resp := s.routeMCPRequest(r.Context(), sessID, &msg)
 	resp.JSONRPC = "2.0"
 	resp.ID = msg.ID
 
@@ -83,14 +84,17 @@ func (s *Server) handleMCPPost(w http.ResponseWriter, r *http.Request) {
 
 // routeMCPRequest dispatches an MCP request to the engine and returns the
 // response. The returned message has no JSONRPC/ID set; the caller fills
-// those in.
-func (s *Server) routeMCPRequest(ctx context.Context, msg *mcp.Message) *mcp.Message {
+// those in. sessID is used to bind clientInfo on initialize and to look
+// it back up on subsequent tool calls so the dashboard can attribute
+// each call to the right MCP client.
+func (s *Server) routeMCPRequest(ctx context.Context, sessID string, msg *mcp.Message) *mcp.Message {
 	switch msg.Method {
 	case mcp.MethodInitialize:
 		var params mcp.InitializeParams
 		if len(msg.Params) > 0 {
 			_ = json.Unmarshal(msg.Params, &params)
 		}
+		s.setSessionClient(sessID, formatHTTPClientName(params.ClientInfo))
 		result := s.engine.HandleInitialize(params.ClientInfo)
 		b, _ := json.Marshal(result)
 		return &mcp.Message{Result: b}
@@ -107,11 +111,26 @@ func (s *Server) routeMCPRequest(ctx context.Context, msg *mcp.Message) *mcp.Mes
 				return &mcp.Message{Error: &mcp.RPCError{Code: -32602, Message: "Invalid params: " + err.Error()}}
 			}
 		}
-		return s.engine.CallTool(ctx, params.Name, params.Arguments)
+		return s.engine.CallTool(ctx, params.Name, params.Arguments, s.sessionClient(sessID))
 
 	default:
 		return &mcp.Message{Error: &mcp.RPCError{Code: -32601, Message: "Method not found: " + msg.Method}}
 	}
+}
+
+// formatHTTPClientName renders MCP clientInfo into a short display
+// string. Mirrors the same logic the stdio proxy uses so dashboard
+// attribution looks identical whether the client connects over stdio
+// or HTTP.
+func formatHTTPClientName(info mcp.Info) string {
+	name := strings.TrimSpace(info.Name)
+	if name == "" {
+		return "unknown"
+	}
+	if info.Version != "" {
+		return name + " " + info.Version
+	}
+	return name
 }
 
 // handleMCPGet streams server-initiated notifications to a connected
@@ -192,6 +211,28 @@ func (s *Server) openSession(id string) {
 	s.mcpMu.Lock()
 	s.mcpSessions[id] = &mcpSession{id: id, lastSeen: time.Now()}
 	s.mcpMu.Unlock()
+}
+
+// setSessionClient records the MCP client identity for a session at
+// initialize time. Subsequent tool calls on this session attribute back
+// to this client in the dashboard.
+func (s *Server) setSessionClient(id, client string) {
+	s.mcpMu.Lock()
+	defer s.mcpMu.Unlock()
+	if sess, ok := s.mcpSessions[id]; ok {
+		sess.clientName = client
+	}
+}
+
+// sessionClient returns the client name recorded for a session, or
+// "unknown" if none was captured (older clients, race conditions).
+func (s *Server) sessionClient(id string) string {
+	s.mcpMu.Lock()
+	defer s.mcpMu.Unlock()
+	if sess, ok := s.mcpSessions[id]; ok && sess.clientName != "" {
+		return sess.clientName
+	}
+	return "unknown"
 }
 
 // touchSession updates lastSeen and returns whether the session is still

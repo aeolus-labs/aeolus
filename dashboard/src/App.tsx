@@ -202,23 +202,31 @@ function LiveView(props: {
   onStatusFilter: (s: '' | 'ok' | 'error') => void
 }) {
   const { events, filtered, stats, upstreams } = props
+  const [expanded, setExpanded] = useState<string | null>(null)
+
+  const servers = useMemo(() => summarizeByServer(events, upstreams), [events, upstreams])
+
   return (
-    <>
+    <div className="live-view">
       <FilterBar
         search={props.search}
         onSearch={props.onSearch}
-        upstream={props.upstreamFilter}
-        onUpstream={props.onUpstreamFilter}
-        upstreams={upstreams}
         status={props.statusFilter}
         onStatus={props.onStatusFilter}
       />
 
+      <ServerCardsRow
+        events={events}
+        servers={servers}
+        active={props.upstreamFilter}
+        onSelect={props.onUpstreamFilter}
+      />
+
       {stats.length > 0 && <StatsStrip stats={stats} />}
 
-      <main className="main">
-        <section className="calls">
-          <h2>Live tool calls</h2>
+      <section className="calls">
+        <h2>Live tool calls</h2>
+        <div className="calls-scroll">
           {filtered.length === 0 ? (
             <div className="empty">
               {events.length === 0
@@ -229,43 +237,40 @@ function LiveView(props: {
             <table className="calls-table">
               <thead>
                 <tr>
+                  <th aria-label="Expand" />
                   <th>Time</th>
                   <th>Upstream</th>
                   <th>Tool</th>
+                  <th>Client</th>
                   <th className="num-th">Latency</th>
                   <th>Status</th>
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((e, i) => (
-                  <tr key={`${e.time}-${i}`}>
-                    <td className="mono">{formatTime(e.time)}</td>
-                    <td><span className="badge">{e.upstream}</span></td>
-                    <td className="mono">{e.tool}</td>
-                    <td className="num">
-                      {e.latency_ms}
-                      <span className="unit">ms</span>
-                    </td>
-                    <td>
-                      <span className={`status status-${statusClass(e.status)}`}>{e.status}</span>
-                    </td>
-                  </tr>
-                ))}
+                {filtered.map((e, i) => {
+                  const key = `${e.time}-${i}`
+                  const isOpen = expanded === key
+                  return (
+                    <CallRow
+                      key={key}
+                      event={e}
+                      open={isOpen}
+                      onToggle={() => setExpanded(isOpen ? null : key)}
+                    />
+                  )
+                })}
               </tbody>
             </table>
           )}
-        </section>
-      </main>
-    </>
+        </div>
+      </section>
+    </div>
   )
 }
 
 function FilterBar(props: {
   search: string
   onSearch: (s: string) => void
-  upstream: string
-  onUpstream: (u: string) => void
-  upstreams: string[]
   status: '' | 'ok' | 'error'
   onStatus: (s: '' | 'ok' | 'error') => void
 }) {
@@ -280,16 +285,6 @@ function FilterBar(props: {
       />
       <select
         className="select"
-        value={props.upstream}
-        onChange={(e) => props.onUpstream(e.target.value)}
-      >
-        <option value="">All upstreams</option>
-        {props.upstreams.map((u) => (
-          <option key={u} value={u}>{u}</option>
-        ))}
-      </select>
-      <select
-        className="select"
         value={props.status}
         onChange={(e) => props.onStatus(e.target.value as '' | 'ok' | 'error')}
       >
@@ -299,6 +294,181 @@ function FilterBar(props: {
       </select>
     </div>
   )
+}
+
+type ServerSummary = {
+  name: string
+  count: number
+  errors: number
+  p95_ms: number
+  lastSeen: number // epoch ms, 0 if never
+  sparkline: number[]
+}
+
+function ServerCardsRow(props: {
+  events: ToolCallEvent[]
+  servers: ServerSummary[]
+  active: string
+  onSelect: (name: string) => void
+}) {
+  const { events, servers, active, onSelect } = props
+  const totalCount = events.length
+  const totalErrors = events.filter((e) => e.status !== 'ok').length
+  const allLatencies = events.map((e) => e.latency_ms)
+  const allP95 = percentile(allLatencies, 95)
+  const allSparkline = sparklineCounts(events)
+
+  return (
+    <div className="server-cards">
+      <ServerCard
+        name="All servers"
+        count={totalCount}
+        errors={totalErrors}
+        p95_ms={allP95}
+        sparkline={allSparkline}
+        active={active === ''}
+        onClick={() => onSelect('')}
+        idle={false}
+      />
+      {servers.map((s) => (
+        <ServerCard
+          key={s.name}
+          name={s.name}
+          count={s.count}
+          errors={s.errors}
+          p95_ms={s.p95_ms}
+          sparkline={s.sparkline}
+          active={active === s.name}
+          onClick={() => onSelect(s.name)}
+          idle={s.count === 0}
+        />
+      ))}
+    </div>
+  )
+}
+
+function ServerCard(props: {
+  name: string
+  count: number
+  errors: number
+  p95_ms: number
+  sparkline: number[]
+  active: boolean
+  onClick: () => void
+  idle: boolean
+}) {
+  const classes = ['server-card']
+  if (props.active) classes.push('server-card-active')
+  if (props.idle) classes.push('server-card-idle')
+  return (
+    <button className={classes.join(' ')} onClick={props.onClick}>
+      <div className="server-card-head">
+        <span className={`server-dot server-dot-${props.errors > 0 ? 'warn' : props.count > 0 ? 'on' : 'off'}`} />
+        <span className="server-card-name">{props.name}</span>
+      </div>
+      <Sparkline values={props.sparkline} />
+      <div className="server-card-row">
+        <span className="server-card-num">{props.count}</span>
+        <span className="server-card-label">calls</span>
+        {props.errors > 0 && (
+          <>
+            <span className="stat-card-divider" />
+            <span className="server-card-num server-card-error">{props.errors}</span>
+            <span className="server-card-label">err</span>
+          </>
+        )}
+        <span className="stat-card-divider" />
+        <span className="server-card-num">
+          {props.p95_ms}
+          <span className="unit">ms</span>
+        </span>
+        <span className="server-card-label">p95</span>
+      </div>
+    </button>
+  )
+}
+
+function Sparkline({ values }: { values: number[] }) {
+  const w = 120
+  const h = 24
+  const max = Math.max(1, ...values)
+  const barW = w / Math.max(1, values.length)
+  return (
+    <svg className="sparkline" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" width={w} height={h}>
+      {values.map((v, i) => {
+        const bh = Math.max(v > 0 ? 1 : 0, (v / max) * (h - 2))
+        return (
+          <rect
+            key={i}
+            x={i * barW}
+            y={h - bh}
+            width={Math.max(1, barW - 1)}
+            height={bh}
+            className="sparkline-bar"
+          />
+        )
+      })}
+    </svg>
+  )
+}
+
+function CallRow(props: { event: ToolCallEvent; open: boolean; onToggle: () => void }) {
+  const { event, open, onToggle } = props
+  return (
+    <>
+      <tr className={`call-row ${open ? 'call-row-open' : ''}`} onClick={onToggle}>
+        <td className="call-toggle">
+          <ChevronIcon flipped={open} />
+        </td>
+        <td className="mono">{formatTime(event.time)}</td>
+        <td><span className="badge">{event.upstream}</span></td>
+        <td className="mono">{event.tool}</td>
+        <td className="client-cell">{event.client || <span className="muted">—</span>}</td>
+        <td className="num">
+          {event.latency_ms}
+          <span className="unit">ms</span>
+        </td>
+        <td>
+          <span className={`status status-${statusClass(event.status)}`}>{event.status}</span>
+        </td>
+      </tr>
+      {open && (
+        <tr className="call-detail-row">
+          <td colSpan={7}>
+            <CallDetail event={event} />
+          </td>
+        </tr>
+      )}
+    </>
+  )
+}
+
+function CallDetail({ event }: { event: ToolCallEvent }) {
+  return (
+    <div className="call-detail">
+      <div className="call-detail-section">
+        <div className="call-detail-label">Arguments</div>
+        <JsonView value={event.arguments} />
+      </div>
+      <div className="call-detail-section">
+        <div className="call-detail-label">Response</div>
+        <JsonView value={event.response} />
+      </div>
+    </div>
+  )
+}
+
+function JsonView({ value }: { value: unknown }) {
+  if (value === undefined || value === null) {
+    return <div className="call-detail-empty">— not recorded —</div>
+  }
+  let text: string
+  try {
+    text = JSON.stringify(value, null, 2)
+  } catch {
+    text = String(value)
+  }
+  return <pre className="call-detail-json">{text}</pre>
 }
 
 type ToolStats = {
@@ -386,4 +556,57 @@ function percentile(values: number[], p: number): number {
   const sorted = [...values].sort((a, b) => a - b)
   const idx = Math.floor((p / 100) * (sorted.length - 1))
   return sorted[Math.max(0, Math.min(idx, sorted.length - 1))]
+}
+
+// summarizeByServer produces a per-upstream rollup driven by the
+// unfiltered event window so each server card shows real activity even
+// when the table is filtered.
+function summarizeByServer(events: ToolCallEvent[], known: string[]): ServerSummary[] {
+  const byName = new Map<string, ToolCallEvent[]>()
+  for (const name of known) byName.set(name, [])
+  for (const e of events) {
+    const arr = byName.get(e.upstream) ?? []
+    arr.push(e)
+    byName.set(e.upstream, arr)
+  }
+  const out: ServerSummary[] = []
+  for (const [name, items] of byName) {
+    const latencies = items.map((i) => i.latency_ms)
+    const errors = items.filter((i) => i.status !== 'ok').length
+    const lastSeen = items.length > 0 ? new Date(items[0].time).getTime() : 0
+    out.push({
+      name,
+      count: items.length,
+      errors,
+      p95_ms: percentile(latencies, 95),
+      lastSeen,
+      sparkline: sparklineCounts(items),
+    })
+  }
+  // Active servers first (recent activity), then idle ones by name.
+  return out.sort((a, b) => {
+    if (b.lastSeen !== a.lastSeen) return b.lastSeen - a.lastSeen
+    return a.name.localeCompare(b.name)
+  })
+}
+
+// sparklineCounts buckets events into the last SPARKLINE_WINDOW_MS,
+// returning a fixed-length array of bucket counts. Newest activity is
+// on the right edge of the resulting array so it reads left-to-right
+// like a normal timeline.
+const SPARKLINE_BUCKETS = 30
+const SPARKLINE_WINDOW_MS = 5 * 60 * 1000 // last 5 minutes
+
+function sparklineCounts(events: ToolCallEvent[]): number[] {
+  const now = Date.now()
+  const bucketSize = SPARKLINE_WINDOW_MS / SPARKLINE_BUCKETS
+  const counts = new Array<number>(SPARKLINE_BUCKETS).fill(0)
+  for (const e of events) {
+    const t = new Date(e.time).getTime()
+    const ageMs = now - t
+    if (ageMs < 0 || ageMs >= SPARKLINE_WINDOW_MS) continue
+    const idx = SPARKLINE_BUCKETS - 1 - Math.floor(ageMs / bucketSize)
+    if (idx >= 0 && idx < SPARKLINE_BUCKETS) counts[idx]++
+  }
+  return counts
 }

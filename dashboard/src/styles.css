@@ -335,8 +335,8 @@ body {
 }
 
 .stat-card {
-  flex: 0 0 auto;
-  min-width: 220px;
+  flex: 0 0 220px;
+  width: 220px;
   padding: 12px 14px;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
@@ -462,16 +462,20 @@ body {
 
 .calls-table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate; /* lets thead sticky cells own their own background */
+  border-spacing: 0;
   background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: hidden;
   font-size: 13px;
 }
 
-.calls-table thead {
-  background: rgba(0, 0, 0, 0.25);
+.calls-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-secondary);
+  /* The cell border is what the user sees while scrolling — without
+     this the header looks detached from the rows underneath. */
+  box-shadow: inset 0 -1px 0 var(--border);
 }
 
 .calls-table th {
@@ -1351,4 +1355,267 @@ body {
   font-size: 11px;
   color: var(--text-muted);
   margin-top: 2px;
+}
+
+/* Live view layout: header items fixed, calls table area scrollable. */
+
+.live-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.live-view .filter-bar,
+.live-view .server-cards,
+.live-view .stats-strip {
+  flex: 0 0 auto;
+}
+
+.live-view .calls {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding-top: 16px;
+  padding-bottom: 16px;
+}
+
+.live-view .calls h2 {
+  flex: 0 0 auto;
+}
+
+.calls-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* Let horizontally-overflowing wide tables scroll inside this box too. */
+  overflow-x: auto;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+/* Server cards row (Live view primary filter) */
+
+.server-cards {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 10px;
+  margin: 16px 0 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 6px;
+  /* Allow position:sticky on the first card to anchor against this row's
+     left edge while the rest scroll. */
+  position: relative;
+}
+
+/* Pin the first card ("All servers") to the left edge so the
+   summary stays visible while specific-server cards scroll. */
+.server-cards > .server-card:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  /* Cards behind the sticky one shouldn't be visible "through" it. */
+  background: var(--bg-secondary);
+  box-shadow: 4px 0 6px -4px rgba(0, 0, 0, 0.4);
+}
+
+.server-card {
+  flex: 0 0 200px;
+  width: 200px;
+  padding: 10px 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  transition: border-color 0.12s, background 0.12s;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.server-card:hover {
+  border-color: var(--border-strong, var(--text-muted));
+}
+
+.server-card-active {
+  border-color: var(--accent);
+  background: var(--bg-row-hover);
+}
+
+.server-card-idle {
+  opacity: 0.55;
+}
+
+.server-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.server-card-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.server-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.server-dot-on {
+  background: var(--ok, #4ade80);
+  box-shadow: 0 0 6px rgba(74, 222, 128, 0.4);
+}
+
+.server-dot-warn {
+  background: var(--error, #f87171);
+}
+
+.server-dot-off {
+  background: var(--text-muted);
+  opacity: 0.5;
+}
+
+.server-card-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-family: var(--mono);
+}
+
+.server-card-num {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.server-card-num .unit {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-weight: 400;
+  margin-left: 1px;
+}
+
+.server-card-error {
+  color: var(--error);
+}
+
+.server-card-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.sparkline {
+  width: 100%;
+  height: 24px;
+  display: block;
+}
+
+.sparkline-bar {
+  fill: var(--accent, #60a5fa);
+  opacity: 0.75;
+}
+
+.server-card-idle .sparkline-bar {
+  opacity: 0.4;
+}
+
+/* Expandable call rows */
+
+.calls-table .call-row {
+  cursor: pointer;
+}
+
+.calls-table .call-toggle {
+  width: 28px;
+  color: var(--text-muted);
+}
+
+.calls-table .call-row-open {
+  background: var(--bg-row-hover);
+}
+
+.calls-table .call-detail-row td {
+  background: var(--bg);
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.call-detail {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  padding: 14px 18px;
+}
+
+@media (max-width: 800px) {
+  .call-detail {
+    grid-template-columns: 1fr;
+  }
+}
+
+.call-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.call-detail-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-muted);
+}
+
+.call-detail-json {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.call-detail-empty {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-muted);
+  padding: 10px 12px;
+  background: var(--bg-secondary);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+}
+
+.client-cell {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+}
+
+.muted {
+  color: var(--text-muted);
 }

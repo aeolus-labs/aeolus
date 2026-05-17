@@ -27,11 +27,14 @@ import (
 
 // Event is a single tool call observed by the proxy.
 type Event struct {
-	Time      time.Time `json:"time"`
-	Upstream  string    `json:"upstream"`
-	Tool      string    `json:"tool"`
-	LatencyMs int64     `json:"latency_ms"`
-	Status    string    `json:"status"`
+	Time      time.Time       `json:"time"`
+	Upstream  string          `json:"upstream"`
+	Tool      string          `json:"tool"`
+	LatencyMs int64           `json:"latency_ms"`
+	Status    string          `json:"status"`
+	Client    string          `json:"client,omitempty"`
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+	Response  json.RawMessage `json:"response,omitempty"`
 }
 
 type Server struct {
@@ -48,6 +51,8 @@ type Server struct {
 	reloadFn    ReloadFunc // nil until SetReloader is called
 
 	engine McpEngine // nil until SetEngine is called
+
+	events *eventStore // nil = persistence disabled (in-memory only)
 
 	mcpMu       sync.Mutex
 	mcpSessions map[string]*mcpSession
@@ -67,17 +72,20 @@ type Server struct {
 type McpEngine interface {
 	HandleInitialize(clientInfo mcp.Info) *mcp.InitializeResult
 	ListTools() []mcp.Tool
-	CallTool(ctx context.Context, name string, arguments json.RawMessage) *mcp.Message
+	CallTool(ctx context.Context, name string, arguments json.RawMessage, client string) *mcp.Message
 	SubscribeToolsChanged() (<-chan struct{}, func())
 	ShuttingDown() <-chan struct{}
 }
 
 // mcpSession holds per-MCP-client state. Currently minimal; sessions
-// expire after sessionIdleTimeout of no traffic.
+// expire after sessionIdleTimeout of no traffic. clientName is captured
+// from the initialize handshake and attached to every observation so
+// the dashboard can show which client made each tool call.
 type mcpSession struct {
 	id          string
 	initialized bool
 	lastSeen    time.Time
+	clientName  string
 }
 
 const (
@@ -119,6 +127,41 @@ func (s *Server) SetEngine(eng McpEngine) {
 	s.cfgMu.Unlock()
 }
 
+// EnableEventPersistence opens a JSONL file at path, loads its tail into
+// the in-memory recent-events ring, and starts appending every Emit'd
+// event so the dashboard survives daemon restarts. Failures (no disk
+// permission, full disk) log a warning and leave the dashboard running
+// with the existing in-memory-only behavior.
+func (s *Server) EnableEventPersistence(path string) {
+	store, err := openEventStore(path, s.log)
+	if err != nil {
+		s.log.Warn("event_persistence_disabled", "path", path, "error", err.Error())
+		return
+	}
+	tail := store.LoadTail(s.maxRecent)
+	s.mu.Lock()
+	s.events = store
+	if len(tail) > 0 {
+		s.recent = append(s.recent[:0], tail...)
+	}
+	count := len(s.recent)
+	s.mu.Unlock()
+	s.log.Info("event_persistence_enabled", "path", path, "restored", count)
+}
+
+// Close releases any resources Server owns (currently just the events
+// file). Safe to call multiple times. Always returns nil today.
+func (s *Server) Close() error {
+	s.mu.Lock()
+	store := s.events
+	s.events = nil
+	s.mu.Unlock()
+	if store != nil {
+		_ = store.Close()
+	}
+	return nil
+}
+
 // SetConfig replaces the current config snapshot served by /api/config.
 func (s *Server) SetConfig(cfg *config.Config) {
 	s.cfgMu.Lock()
@@ -137,18 +180,23 @@ func (s *Server) SetReloader(configPath string, fn ReloadFunc) {
 }
 
 // Emit records an event in the ring buffer and broadcasts it to subscribers.
-// Slow subscribers see the event dropped.
+// Slow subscribers see the event dropped. If persistence is enabled the
+// event is also appended to the JSONL store so it survives restarts.
 func (s *Server) Emit(e Event) {
 	s.mu.Lock()
 	s.recent = append(s.recent, e)
 	if len(s.recent) > s.maxRecent {
 		s.recent = s.recent[len(s.recent)-s.maxRecent:]
 	}
+	store := s.events
 	subs := make([]chan Event, 0, len(s.subscribers))
 	for ch := range s.subscribers {
 		subs = append(subs, ch)
 	}
 	s.mu.Unlock()
+	if store != nil {
+		store.Append(e)
+	}
 	for _, ch := range subs {
 		select {
 		case ch <- e:

@@ -6,6 +6,9 @@ export type ToolCallEvent = {
   tool: string
   latency_ms: number
   status: ToolCallStatus
+  client?: string
+  arguments?: unknown
+  response?: unknown
 }
 
 export type Stats = {

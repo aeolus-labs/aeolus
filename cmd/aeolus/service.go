@@ -37,8 +37,7 @@ func handleService(args []string) {
 	case "stop":
 		stopService(true)
 	case "restart":
-		stopService(false)
-		startService()
+		restartService()
 	case "status":
 		statusService()
 	case "uninstall":
@@ -107,6 +106,11 @@ func plistContent() string {
         <key>Crashed</key>
         <true/>
     </dict>
+    <!-- 1s instead of the launchd default of 10s. Still prevents tight
+         crash loops but does not punish aeolus service restart during
+         development. -->
+    <key>ThrottleInterval</key>
+    <integer>1</integer>
     <key>StandardOutPath</key>
     <string>%s</string>
     <key>StandardErrorPath</key>
@@ -202,13 +206,15 @@ func startService() {
 		fmt.Fprintln(os.Stderr, "service: plist not found — run `aeolus service install` first.")
 		os.Exit(1)
 	}
-	target := fmt.Sprintf("gui/%d", os.Getuid())
-	out, err := runCmd("launchctl", "bootstrap", target, plistPath())
+	domain := fmt.Sprintf("gui/%d", os.Getuid())
+	jobTarget := domain + "/" + launchAgentLabel
+
+	out, err := runCmd("launchctl", "bootstrap", domain, plistPath())
 	if err != nil {
 		if alreadyBootstrapped(out) {
 			fmt.Println("Already loaded — kickstarting...")
-			if _, kerr := runCmd("launchctl", "kickstart", "-k", target+"/"+launchAgentLabel); kerr != nil {
-				fmt.Fprintln(os.Stderr, "service start: kickstart failed:", kerr)
+			if kerr := kickstartWithRetry(jobTarget); kerr != nil {
+				fmt.Fprintln(os.Stderr, "service start:", kerr)
 				os.Exit(1)
 			}
 			fmt.Println("Restarted.")
@@ -219,6 +225,64 @@ func startService() {
 		os.Exit(1)
 	}
 	fmt.Println("Started.")
+}
+
+// restartService restarts the daemon in place via `launchctl kickstart -k`
+// when the service is already loaded — that's the launchd-idiomatic way
+// to cycle a job and avoids the bootout-then-bootstrap race that drops
+// us into launchd's throttle window. If the service isn't loaded yet,
+// fall back to startService() to bootstrap from scratch.
+func restartService() {
+	domain := fmt.Sprintf("gui/%d", os.Getuid())
+	jobTarget := domain + "/" + launchAgentLabel
+
+	if _, err := runCmd("launchctl", "print", jobTarget); err != nil {
+		// Not loaded — bootstrap from scratch.
+		startService()
+		return
+	}
+	if err := kickstartWithRetry(jobTarget); err != nil {
+		fmt.Fprintln(os.Stderr, "service restart:", err)
+		os.Exit(1)
+	}
+	fmt.Println("Restarted.")
+}
+
+// kickstartWithRetry runs `launchctl kickstart -k target`, retrying once
+// after a short sleep if launchd is throttling the restart (exit 37 /
+// "Operation now in progress"). The retry handles the common case where
+// you `aeolus service restart` faster than launchd's ThrottleInterval.
+func kickstartWithRetry(target string) error {
+	out, err := runCmd("launchctl", "kickstart", "-k", target)
+	if err == nil {
+		return nil
+	}
+	if isThrottleError(out, err) {
+		fmt.Println("launchd is throttling — waiting 2s and retrying...")
+		time.Sleep(2 * time.Second)
+		out, err = runCmd("launchctl", "kickstart", "-k", target)
+		if err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("kickstart failed: %v: %s", err, strings.TrimSpace(string(out)))
+}
+
+// isThrottleError detects launchctl's "Operation now in progress" /
+// "throttled" responses across the two ways it can surface (exit code
+// or stderr text). Conservative — any unknown error is treated as
+// non-throttle so we surface it to the user instead of silently
+// retrying.
+func isThrottleError(out []byte, err error) bool {
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		// Exit 37 is the most common kickstart-throttle code on macOS 12+.
+		if exitErr.ExitCode() == 37 {
+			return true
+		}
+	}
+	s := strings.ToLower(string(out))
+	return strings.Contains(s, "operation now in progress") ||
+		strings.Contains(s, "throttle")
 }
 
 func stopService(printOnSuccess bool) {

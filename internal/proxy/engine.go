@@ -221,8 +221,10 @@ func (e *Engine) ListTools() []mcp.Tool {
 }
 
 // CallTool routes a tools/call to the owning upstream and returns the
-// response or an MCP-style error message. The observer hook fires once.
-func (e *Engine) CallTool(ctx context.Context, exposed string, arguments json.RawMessage) *mcp.Message {
+// response or an MCP-style error message. The observer hook fires once
+// with the arguments, response, and originating client so the dashboard
+// can show per-call detail and per-client attribution.
+func (e *Engine) CallTool(ctx context.Context, exposed string, arguments json.RawMessage, client string) *mcp.Message {
 	e.toolMu.RLock()
 	entry, ok := e.toolMap[exposed]
 	e.toolMu.RUnlock()
@@ -253,7 +255,8 @@ func (e *Engine) CallTool(ctx context.Context, exposed string, arguments json.Ra
 			"status", "transport_error",
 			"error", err.Error(),
 		)
-		e.observe(exposed, entry.upstream.Name(), latency, "transport_error", started)
+		errResp, _ := json.Marshal(map[string]string{"transport_error": err.Error()})
+		e.observe(exposed, entry.upstream.Name(), latency, "transport_error", started, client, arguments, errResp)
 		return errorMessage(-32603, "Upstream error: "+err.Error())
 	}
 
@@ -267,7 +270,13 @@ func (e *Engine) CallTool(ctx context.Context, exposed string, arguments json.Ra
 		"latency_ms", latency.Milliseconds(),
 		"status", status,
 	)
-	e.observe(exposed, entry.upstream.Name(), latency, status, started)
+	var responseBody json.RawMessage
+	if resp.Error != nil {
+		responseBody, _ = json.Marshal(resp.Error)
+	} else {
+		responseBody = resp.Result
+	}
+	e.observe(exposed, entry.upstream.Name(), latency, status, started, client, arguments, responseBody)
 
 	return &mcp.Message{
 		JSONRPC: "2.0",
@@ -305,17 +314,44 @@ func (e *Engine) broadcastToolsChanged() {
 	}
 }
 
-func (e *Engine) observe(tool, up string, latency time.Duration, status string, when time.Time) {
+// maxObservationPayload caps the size of args/response we forward to the
+// observer. With a recent-events buffer in the dashboard (~200 entries),
+// 16 KiB per side keeps total memory bounded at ~6 MiB worst-case while
+// still preserving full payloads for the vast majority of real calls.
+const maxObservationPayload = 16 << 10
+
+func (e *Engine) observe(tool, up string, latency time.Duration, status string, when time.Time, client string, args, response json.RawMessage) {
 	if e.observer == nil {
 		return
 	}
 	e.observer(ToolCallObservation{
-		Time:     when,
-		Tool:     tool,
-		Upstream: up,
-		Latency:  latency,
-		Status:   status,
+		Time:      when,
+		Tool:      tool,
+		Upstream:  up,
+		Latency:   latency,
+		Status:    status,
+		Client:    client,
+		Arguments: capPayload(args),
+		Response:  capPayload(response),
 	})
+}
+
+// capPayload returns p unchanged if it's small enough to keep, or a
+// placeholder JSON value describing the truncated length otherwise.
+// Nil / empty input is returned untouched.
+func capPayload(p json.RawMessage) json.RawMessage {
+	if len(p) == 0 {
+		return p
+	}
+	if len(p) <= maxObservationPayload {
+		return p
+	}
+	placeholder, _ := json.Marshal(map[string]any{
+		"_truncated":      true,
+		"original_bytes":  len(p),
+		"preserved_bytes": maxObservationPayload,
+	})
+	return placeholder
 }
 
 func (e *Engine) toolCount() int {

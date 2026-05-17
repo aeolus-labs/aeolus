@@ -142,6 +142,19 @@ func defaultConfigPath() string {
 	return "aeolus.yaml"
 }
 
+// defaultEventsPath returns the XDG data-home location for the
+// dashboard's persisted tool-call log. Kept separate from the config
+// directory so backing up / wiping data is independent of config.
+func defaultEventsPath() string {
+	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+		return filepath.Join(xdg, "aeolus", "events.jsonl")
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".local", "share", "aeolus", "events.jsonl")
+	}
+	return "events.jsonl"
+}
+
 func printUsage() {
 	fmt.Print(`Aeolus — local gateway for MCP servers.
 
@@ -270,6 +283,7 @@ func run(configPath string, dashboardPort int) error {
 	var wg sync.WaitGroup
 	if cfg.Dashboard.Enabled {
 		dashSrv = dashboard.New(cfg.Dashboard.Addr, logger, cfg)
+		dashSrv.EnableEventPersistence(defaultEventsPath())
 		observer = func(o proxy.ToolCallObservation) {
 			dashSrv.Emit(dashboard.Event{
 				Time:      o.Time,
@@ -277,6 +291,9 @@ func run(configPath string, dashboardPort int) error {
 				Tool:      o.Tool,
 				LatencyMs: o.Latency.Milliseconds(),
 				Status:    o.Status,
+				Client:    o.Client,
+				Arguments: o.Arguments,
+				Response:  o.Response,
 			})
 		}
 		wg.Add(1)
@@ -285,6 +302,7 @@ func run(configPath string, dashboardPort int) error {
 			if err := dashSrv.Run(ctx); err != nil {
 				logger.Error("dashboard_error", "error", err.Error())
 			}
+			_ = dashSrv.Close()
 		}()
 	}
 

@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aeolus-labs/aeolus/internal/config"
@@ -32,11 +33,14 @@ const (
 // ToolCallObservation is emitted after each tools/call response (success
 // or error) so observers can record metrics or stream events.
 type ToolCallObservation struct {
-	Time     time.Time
-	Tool     string
-	Upstream string
-	Latency  time.Duration
-	Status   string // "ok" | "error" | "transport_error"
+	Time      time.Time
+	Tool      string
+	Upstream  string
+	Latency   time.Duration
+	Status    string // "ok" | "error" | "transport_error"
+	Client    string // MCP client info from initialize, e.g. "claude-code 1.0.0"
+	Arguments json.RawMessage
+	Response  json.RawMessage
 }
 
 // Observer is called once per tools/call completion. nil is allowed.
@@ -123,6 +127,9 @@ type Proxy struct {
 	engine *Engine
 	client *mcp.Conn
 	log    *slog.Logger
+
+	clientMu   sync.Mutex
+	clientName string // captured on initialize, attached to every tool call
 }
 
 // New constructs a Proxy that owns its own Engine. For multi-client
@@ -218,6 +225,10 @@ func (p *Proxy) replyInitialize(msg *mcp.Message) error {
 	if len(msg.Params) > 0 {
 		_ = json.Unmarshal(msg.Params, &params)
 	}
+	p.clientMu.Lock()
+	p.clientName = formatClientName(params.ClientInfo)
+	p.clientMu.Unlock()
+
 	result := p.engine.HandleInitialize(params.ClientInfo)
 	resultRaw, err := json.Marshal(result)
 	if err != nil {
@@ -228,6 +239,20 @@ func (p *Proxy) replyInitialize(msg *mcp.Message) error {
 		ID:      msg.ID,
 		Result:  resultRaw,
 	})
+}
+
+// formatClientName renders the clientInfo from an initialize call into a
+// short display string for the dashboard. Falls back to "unknown" when
+// the client doesn't send a name (older MCP clients).
+func formatClientName(info mcp.Info) string {
+	name := strings.TrimSpace(info.Name)
+	if name == "" {
+		return "unknown"
+	}
+	if info.Version != "" {
+		return name + " " + info.Version
+	}
+	return name
 }
 
 func (p *Proxy) replyToolsList(msg *mcp.Message) error {
@@ -250,7 +275,10 @@ func (p *Proxy) routeToolsCall(ctx context.Context, msg *mcp.Message) error {
 			return p.replyError(msg.ID, -32602, "Invalid params: "+err.Error())
 		}
 	}
-	resp := p.engine.CallTool(ctx, params.Name, params.Arguments)
+	p.clientMu.Lock()
+	client := p.clientName
+	p.clientMu.Unlock()
+	resp := p.engine.CallTool(ctx, params.Name, params.Arguments, client)
 	resp.ID = msg.ID
 	return p.client.Write(resp)
 }
