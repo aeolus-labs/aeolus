@@ -20,6 +20,8 @@ export type Stats = {
 export type Upstream = {
   name: string
   transport?: string
+  /** Missing = enabled. Explicit false = configured but not initialized. */
+  enabled?: boolean
   command?: string
   args?: string[]
   env?: string[]

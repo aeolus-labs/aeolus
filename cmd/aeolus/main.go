@@ -337,6 +337,37 @@ func run(configPath string, dashboardPort int) error {
 
 	if dashSrv != nil {
 		dashSrv.SetReloader(configPath, reloadFn)
+		dashSrv.SetReconnecter(func(reconnectCtx context.Context, name string) error {
+			// Look up the upstream's config so we know how to rebuild it.
+			latest, err := config.Load(configPath)
+			if err != nil {
+				return fmt.Errorf("read config: %w", err)
+			}
+			var found *config.Upstream
+			for i := range latest.Upstreams {
+				if latest.Upstreams[i].Name == name {
+					found = &latest.Upstreams[i]
+					break
+				}
+			}
+			if found == nil {
+				return fmt.Errorf("upstream %q not in config", name)
+			}
+			if !found.IsEnabled() {
+				return fmt.Errorf("upstream %q is disabled — enable it before reconnecting", name)
+			}
+			build := func() (upstream.Server, error) {
+				srv, err := upstream.New(reconnectCtx, *found, logger)
+				if err != nil {
+					return nil, err
+				}
+				if r := srv.Stderr(); r != nil {
+					go forwardStderr(found.Name, r)
+				}
+				return srv, nil
+			}
+			return engine.ReconnectUpstream(reconnectCtx, name, build)
+		})
 	}
 
 	// File watcher: hand edits to aeolus.yaml are picked up automatically.
@@ -376,10 +407,15 @@ func run(configPath string, dashboardPort int) error {
 // startUpstreams launches each configured upstream via the transport-agnostic
 // factory and wires stderr forwarding (no-op for non-subprocess transports).
 // Caller owns the lifetime; pair with Shutdown on each or call Proxy.Reload
-// to hand them off.
+// to hand them off. Upstreams whose IsEnabled() is false are skipped — they
+// remain visible in the config (and dashboard) but never get spawned.
 func startUpstreams(ctx context.Context, list []config.Upstream, logger *slog.Logger) ([]upstream.Server, error) {
 	out := make([]upstream.Server, 0, len(list))
 	for _, u := range list {
+		if !u.IsEnabled() {
+			logger.Info("upstream_disabled", "name", u.Name)
+			continue
+		}
 		srv, err := upstream.New(ctx, u, logger)
 		if err != nil {
 			for _, started := range out {

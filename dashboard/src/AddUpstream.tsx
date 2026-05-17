@@ -48,6 +48,18 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
   const [error, setError] = useState<string | null>(null)
   const [pendingAutoProbe, setPendingAutoProbe] = useState(false)
 
+  // Live conflict check — every other upstream is considered "taken"
+  // except the one we're editing. Reads as true when there's a real
+  // collision so we can light up the inline warning and the suggest
+  // button.
+  const nameConflict = (() => {
+    const trimmed = name.trim()
+    if (!trimmed) return false
+    return config.upstreams.some(
+      (u) => u.name === trimmed && u.name !== editing?.name
+    )
+  })()
+
   const filteredCatalog = useMemo(
     () => applyCatalogFilters(catalog, catalogSearch, catalogFilters).slice(0, 40),
     [catalog, catalogSearch, catalogFilters]
@@ -81,7 +93,7 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
 
   function applyCatalog(entry: CatalogEntry) {
     const slug = lastSegment(entry.id) || entry.name
-    setName(slug)
+    setName(uniqueUpstreamName(slug, config.upstreams.map((u) => u.name)))
     const t = entry.transport === 'http' ? 'http' : 'stdio'
     setTransport(t)
     if (t === 'http') {
@@ -302,6 +314,10 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
               <FormStep
                 name={name}
                 onName={setName}
+                nameConflict={nameConflict}
+                onSuggestUniqueName={() =>
+                  setName(uniqueUpstreamName(name, config.upstreams.map((u) => u.name)))
+                }
                 transport={transport}
                 onTransport={setTransport}
                 command={command}
@@ -415,6 +431,8 @@ function ModalCatalogFilterBar({
 function FormStep(props: {
   name: string
   onName: (s: string) => void
+  nameConflict: boolean
+  onSuggestUniqueName: () => void
   transport: 'stdio' | 'http'
   onTransport: (t: 'stdio' | 'http') => void
   command: string
@@ -432,11 +450,24 @@ function FormStep(props: {
     <div className="modal-body">
       <Field label="Name" hint="Tools will be exposed as name.tool_name">
         <input
-          className="text-input"
+          className={`text-input ${props.nameConflict ? 'text-input-error' : ''}`}
           value={props.name}
           onChange={(e) => props.onName(e.target.value)}
           placeholder="e.g. filesystem"
+          aria-invalid={props.nameConflict}
         />
+        {props.nameConflict && (
+          <div className="field-warning">
+            An upstream named &ldquo;{props.name}&rdquo; already exists.{' '}
+            <button
+              type="button"
+              className="field-warning-link"
+              onClick={props.onSuggestUniqueName}
+            >
+              Use a unique name
+            </button>
+          </div>
+        )}
       </Field>
       <Field label="Transport">
         <div className="segmented">
@@ -640,6 +671,20 @@ function argsLines(s: string): string[] {
 function lastSegment(id: string): string {
   const parts = id.split('/')
   return parts[parts.length - 1] || ''
+}
+
+// uniqueUpstreamName returns base unchanged if it's free, otherwise
+// appends `-2`, `-3`, ... until it finds a name no existing upstream
+// claims. Used both when prefilling from the catalog (so a second
+// "github" entry lands as "github-2" instead of failing later at save)
+// and as a one-click escape from the "name already exists" warning.
+function uniqueUpstreamName(base: string, existing: string[]): string {
+  const taken = new Set(existing)
+  const seed = (base || 'upstream').trim() || 'upstream'
+  if (!taken.has(seed)) return seed
+  let i = 2
+  while (taken.has(`${seed}-${i}`)) i++
+  return `${seed}-${i}`
 }
 
 function addAllowRules(

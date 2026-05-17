@@ -47,8 +47,9 @@ type Server struct {
 
 	cfgMu       sync.RWMutex
 	cfg         *config.Config
-	configPath  string
-	reloadFn    ReloadFunc // nil until SetReloader is called
+	configPath   string
+	reloadFn     ReloadFunc    // nil until SetReloader is called
+	reconnectFn  ReconnectFunc // nil = single-upstream reconnect disabled
 
 	engine McpEngine // nil until SetEngine is called
 
@@ -95,6 +96,11 @@ const (
 // ReloadFunc is invoked after a config change is persisted. It receives the
 // new validated config and is responsible for re-initializing the proxy.
 type ReloadFunc func(ctx context.Context, cfg *config.Config) error
+
+// ReconnectFunc surgically restarts a single upstream by name. Used by
+// POST /api/upstreams/{name}/reconnect. Returning an error surfaces it
+// to the dashboard so the user sees why the reconnect failed.
+type ReconnectFunc func(ctx context.Context, name string) error
 
 // CatalogBatch is a chunk of catalog entries emitted by /api/catalog/stream.
 // done == true on the final batch of a refresh cycle.
@@ -179,6 +185,15 @@ func (s *Server) SetReloader(configPath string, fn ReloadFunc) {
 	s.cfgMu.Unlock()
 }
 
+// SetReconnecter wires up POST /api/upstreams/{name}/reconnect. Without
+// this, single-upstream reconnect returns 503 and clients fall back to a
+// full config save to re-init everything.
+func (s *Server) SetReconnecter(fn ReconnectFunc) {
+	s.cfgMu.Lock()
+	s.reconnectFn = fn
+	s.cfgMu.Unlock()
+}
+
 // Emit records an event in the ring buffer and broadcasts it to subscribers.
 // Slow subscribers see the event dropped. If persistence is enabled the
 // event is also appended to the JSONL store so it survives restarts.
@@ -217,6 +232,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/catalog/stream", s.handleCatalogStream)
 	mux.HandleFunc("/api/probe", s.handleProbe)
 	mux.HandleFunc("/api/secrets/", s.handleSecret)
+	mux.HandleFunc("/api/upstreams/", s.handleUpstream)
 	mux.HandleFunc("/mcp", s.handleMCP)
 	if assets != nil {
 		mux.Handle("/", http.FileServer(http.FS(assets)))

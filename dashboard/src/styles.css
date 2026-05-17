@@ -322,14 +322,39 @@ body {
 .select {
   min-width: 140px;
   cursor: pointer;
+  /* Suppress the native arrow so we can position our own and give it
+     proper breathing room from the right edge — native browser arrows
+     sit too tight against the border. */
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8' fill='none' stroke='%237d8590' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='2 2 6 6 10 2'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 10px 8px;
+  padding-right: 32px;
 }
 
 /* Stats strip */
 
+.stats-strip-wrap {
+  margin: 16px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stats-strip-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
 .stats-strip {
   display: flex;
   gap: 12px;
-  margin: 16px 0 0;
   overflow-x: auto;
   padding-bottom: 4px;
 }
@@ -337,10 +362,13 @@ body {
 .stat-card {
   flex: 0 0 220px;
   width: 220px;
-  padding: 12px 14px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  padding: 10px 12px;
+  /* Sunken into the page rather than raised like the server cards,
+     so the stats strip reads as informational data instead of
+     another row of interactive filters. */
+  background: var(--bg);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
 }
 
 .stat-card-tool {
@@ -617,16 +645,28 @@ body {
 .upstream-grid,
 .catalog-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 12px;
+  gap: 14px;
 }
 
+/* Catalog: many entries, browseable — smaller dense cards. */
+.catalog-grid {
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+}
+
+/* Upstreams: fewer, edited frequently — give them more room so
+   command/args/tool-rules don't truncate. */
 .upstream-grid {
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   padding: 4px 4px 12px 0;
   align-content: start;
+}
+
+.upstream-grid .card {
+  min-height: 260px;
+  padding: 16px 18px;
 }
 
 .catalog-section .catalog-grid {
@@ -1217,6 +1257,35 @@ body {
   font-family: var(--mono);
 }
 
+.text-input-error,
+.text-input-error:focus {
+  border-color: var(--error);
+}
+
+.field-warning {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--error);
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 400;
+}
+
+.field-warning-link {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.field-warning-link:hover {
+  opacity: 0.85;
+}
+
 .segmented {
   display: inline-flex;
   background: var(--bg);
@@ -1406,25 +1475,62 @@ body {
   overflow-x: auto;
   overflow-y: hidden;
   padding-bottom: 6px;
-  /* Allow position:sticky on the first card to anchor against this row's
-     left edge while the rest scroll. */
   position: relative;
+  /* Hide the horizontal scrollbar; horizontal scroll still works via
+     trackpad / wheel / drag, just without the chrome stealing space. */
+  scrollbar-width: none;
 }
 
-/* Pin the first card ("All servers") to the left edge so the
-   summary stays visible while specific-server cards scroll. */
+.server-cards::-webkit-scrollbar {
+  display: none;
+}
+
+/* Pin the first card ("All servers") to the left edge so the summary
+   stays visible while specific-server cards scroll. Layout in the row:
+   |  All servers  |  divider (sticky)  |  scrolling cards  | */
 .server-cards > .server-card:first-child {
   position: sticky;
   left: 0;
-  z-index: 1;
-  /* Cards behind the sticky one shouldn't be visible "through" it. */
+  z-index: 3;
   background: var(--bg-secondary);
-  box-shadow: 4px 0 6px -4px rgba(0, 0, 0, 0.4);
+}
+
+/* Vertical separator between the pinned "All servers" card and the
+   scrolling cards. Rendered as a 41px-wide solid block in page-bg
+   color with a 1px centered line — the wide block is the mask, so
+   scrolling cards crossing into this zone are hidden cleanly (rather
+   than slipping behind the All servers card itself). */
+.server-cards-divider {
+  flex: 0 0 41px;
+  width: 41px;
+  align-self: stretch;
+  background: var(--bg);
+  position: sticky;
+  left: 220px; /* parks right after the All servers card */
+  z-index: 2;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  pointer-events: none;
+  /* The 10px flex gap on .server-cards would otherwise leave a gap on
+     each side of the divider at scroll position 0, then snap shut once
+     the user scrolls and sticky kicks in. Cancel both gaps so the
+     divider sits flush against the All servers card and the next
+     scrolling card from frame 0. */
+  margin-left: -10px;
+  margin-right: -10px;
+}
+
+.server-cards-divider::before {
+  content: '';
+  width: 1px;
+  background: var(--border);
+  margin: 12px 0;
 }
 
 .server-card {
-  flex: 0 0 200px;
-  width: 200px;
+  flex: 0 0 220px;
+  width: 220px;
   padding: 10px 12px;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
@@ -1618,4 +1724,99 @@ body {
 
 .muted {
   color: var(--text-muted);
+}
+
+/* Per-upstream enable/disable toggle + reconnect controls */
+
+.card-disabled {
+  opacity: 0.55;
+}
+
+.card-disabled .card-title {
+  text-decoration: line-through;
+  text-decoration-color: var(--text-muted);
+}
+
+.card-footer-right {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.enable-control {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.enable-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 500;
+}
+
+.enable-state-on {
+  color: var(--ok, #4ade80);
+}
+
+.enable-state-off {
+  color: var(--text-muted);
+}
+
+.enable-state-saving {
+  color: var(--accent, #60a5fa);
+}
+
+@keyframes aeolus-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spinner {
+  animation: aeolus-spin 0.75s linear infinite;
+  flex-shrink: 0;
+}
+
+.toggle-switch {
+  display: inline-flex;
+  align-items: center;
+  width: 32px;
+  height: 18px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  padding: 1px;
+  cursor: pointer;
+  transition: background-color 0.12s, border-color 0.12s;
+  flex-shrink: 0;
+}
+
+.toggle-switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.toggle-switch-knob {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: transform 0.12s, background-color 0.12s;
+}
+
+.toggle-switch-on {
+  background: var(--accent, #2563eb);
+  border-color: var(--accent, #2563eb);
+}
+
+.toggle-switch-on .toggle-switch-knob {
+  background: #fff;
+  transform: translateX(14px);
 }

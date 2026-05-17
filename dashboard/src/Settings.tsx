@@ -26,6 +26,8 @@ export default function Settings() {
   const [editing, setEditing] = useState<Upstream | null>(null)
   const [prefill, setPrefill] = useState<CatalogEntry | null>(null)
   const [removing, setRemoving] = useState<string | null>(null)
+  const [reconnecting, setReconnecting] = useState<string | null>(null)
+  const [toggling, setToggling] = useState<string | null>(null)
   const [settingsTab, setSettingsTab] = useState<'upstreams' | 'catalog'>('upstreams')
   const [knownBad, setKnownBad] = useState<Set<string>>(() => loadKnownBad())
 
@@ -94,6 +96,53 @@ export default function Settings() {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setRemoving(null)
+    }
+  }
+
+  async function setUpstreamEnabled(u: Upstream, enabled: boolean) {
+    if (!config) return
+    setError(null)
+    // Optimistic: flip the toggle visually right away, then roll back on
+    // error. The PUT + reload takes ~1s and the user needs instant
+    // feedback that their click registered.
+    const before = config
+    const next: AeolusConfig = {
+      ...config,
+      upstreams: config.upstreams.map((x) =>
+        x.name === u.name ? { ...x, enabled } : x
+      ),
+    }
+    setConfig(next)
+    setToggling(u.name)
+    try {
+      const r = await fetch('/api/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(next),
+      })
+      if (!r.ok) throw new Error(await r.text())
+      const saved = (await r.json()) as AeolusConfig
+      setConfig(saved)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err))
+      setConfig(before) // roll back the optimistic flip
+    } finally {
+      setToggling(null)
+    }
+  }
+
+  async function reconnectUpstream(u: Upstream) {
+    setError(null)
+    setReconnecting(u.name)
+    try {
+      const r = await fetch(`/api/upstreams/${encodeURIComponent(u.name)}/reconnect`, {
+        method: 'POST',
+      })
+      if (!r.ok) throw new Error(await r.text())
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setReconnecting(null)
     }
   }
 
@@ -184,7 +233,11 @@ export default function Settings() {
                   denyList={denyList}
                   onEdit={() => setEditing(u)}
                   onRemove={() => removeUpstream(u)}
+                  onToggleEnabled={(next) => setUpstreamEnabled(u, next)}
+                  onReconnect={() => reconnectUpstream(u)}
                   removing={removing === u.name}
+                  reconnecting={reconnecting === u.name}
+                  toggling={toggling === u.name}
                 />
               ))}
             </div>
@@ -275,14 +328,22 @@ function UpstreamCard({
   denyList,
   onEdit,
   onRemove,
+  onToggleEnabled,
+  onReconnect,
   removing,
+  reconnecting,
+  toggling,
 }: {
   upstream: Upstream
   allowList: string[]
   denyList: string[]
   onEdit: () => void
   onRemove: () => void
+  onToggleEnabled: (next: boolean) => void
+  onReconnect: () => void
   removing: boolean
+  reconnecting: boolean
+  toggling: boolean
 }) {
   const [tab, setTab] = useState<'setup' | 'tools'>('setup')
 
@@ -296,12 +357,32 @@ function UpstreamCard({
   const argsLine = (upstream.args ?? []).join(' ')
   const envCount = (upstream.env ?? []).length
   const headerCount = Object.keys(upstream.headers ?? {}).length
+  const enabled = upstream.enabled !== false
+  const busy = removing || reconnecting || toggling
 
   return (
-    <div className="card">
+    <div className={`card ${enabled ? '' : 'card-disabled'}`}>
       <div className="card-header">
         <span className="card-title">{upstream.name}</span>
         <span className="badge">{transport}</span>
+        <div className="enable-control">
+          {toggling ? (
+            <span className="enable-state enable-state-saving">
+              <Spinner />
+              {enabled ? 'Enabling…' : 'Disabling…'}
+            </span>
+          ) : (
+            <span className={`enable-state ${enabled ? 'enable-state-on' : 'enable-state-off'}`}>
+              {enabled ? 'Enabled' : 'Disabled'}
+            </span>
+          )}
+          <ToggleSwitch
+            checked={enabled}
+            onChange={onToggleEnabled}
+            disabled={busy}
+            label={enabled ? 'Disable upstream' : 'Enable upstream'}
+          />
+        </div>
       </div>
       <div className="card-subtabs">
         <button
@@ -356,14 +437,72 @@ function UpstreamCard({
         )}
       </div>
       <div className="card-footer card-footer-spaced">
-        <button className="btn-secondary" onClick={onEdit} disabled={removing}>
-          Edit
+        <button
+          className="btn-secondary"
+          onClick={onReconnect}
+          disabled={busy || !enabled}
+          title={!enabled ? 'Enable the upstream first.' : 'Restart this upstream in place.'}
+        >
+          {reconnecting ? 'Reconnecting…' : 'Reconnect'}
         </button>
-        <button className="btn-danger" onClick={onRemove} disabled={removing}>
-          {removing ? 'Removing…' : 'Remove'}
-        </button>
+        <div className="card-footer-right">
+          <button className="btn-secondary" onClick={onEdit} disabled={busy}>
+            Edit
+          </button>
+          <button className="btn-danger" onClick={onRemove} disabled={busy}>
+            {removing ? 'Removing…' : 'Remove'}
+          </button>
+        </div>
       </div>
     </div>
+  )
+}
+
+function ToggleSwitch({
+  checked,
+  onChange,
+  disabled,
+  label,
+}: {
+  checked: boolean
+  onChange: (next: boolean) => void
+  disabled?: boolean
+  label: string
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      title={label}
+      className={`toggle-switch ${checked ? 'toggle-switch-on' : ''}`}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+    >
+      <span className="toggle-switch-knob" />
+    </button>
+  )
+}
+
+function Spinner() {
+  return (
+    <svg
+      className="spinner"
+      viewBox="0 0 16 16"
+      width="12"
+      height="12"
+      aria-hidden="true"
+    >
+      <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="2" opacity="0.25" />
+      <path
+        d="M 8 2 A 6 6 0 0 1 14 8"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+    </svg>
   )
 }
 

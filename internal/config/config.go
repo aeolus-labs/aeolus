@@ -24,6 +24,11 @@ type Upstream struct {
 	Name      string `yaml:"name" json:"name"`
 	Transport string `yaml:"transport,omitempty" json:"transport,omitempty"` // "stdio" (default) or "http"
 
+	// Enabled is a pointer so an absent field reads as "default true" —
+	// existing aeolus.yaml files without the field keep working. Set to
+	// false to turn off this upstream without removing its config.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+
 	// stdio transport fields
 	Command string   `yaml:"command,omitempty" json:"command,omitempty"`
 	Args    []string `yaml:"args,omitempty" json:"args,omitempty"`
@@ -32,6 +37,15 @@ type Upstream struct {
 	// http transport fields
 	URL     string            `yaml:"url,omitempty" json:"url,omitempty"`
 	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+}
+
+// IsEnabled reports whether this upstream should be initialized. Treats
+// a missing Enabled field as "true" so existing configs are unchanged.
+func (u Upstream) IsEnabled() bool {
+	if u.Enabled == nil {
+		return true
+	}
+	return *u.Enabled
 }
 
 type Tools struct {

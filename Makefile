@@ -1,4 +1,4 @@
-.PHONY: all build build-go build-web dev-web test clean release-test release-snapshot
+.PHONY: all build build-go build-web dev-web install test clean release-test release-snapshot
 
 all: build
 
@@ -10,6 +10,15 @@ build-web:
 
 build-go:
 	go build -o aeolus ./cmd/aeolus
+
+# Local dev loop: build, replace the binary at /usr/local/bin (where
+# launchd loads it from per the plist), then restart the service so
+# changes take effect. One command instead of three.
+install: build
+	sudo install -m 0755 ./aeolus /usr/local/bin/aeolus
+	aeolus service restart
+	@echo
+	@echo "Hard-refresh the dashboard (Cmd+Shift+R) so the browser picks up the new JS/CSS."
 
 # Run the Vite dev server. In another terminal, run aeolus normally —
 # the Vite server proxies /api/* to it.

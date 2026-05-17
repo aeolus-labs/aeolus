@@ -213,6 +213,9 @@ function LiveView(props: {
         onSearch={props.onSearch}
         status={props.statusFilter}
         onStatus={props.onStatusFilter}
+        upstreams={upstreams}
+        upstreamFilter={props.upstreamFilter}
+        onUpstreamFilter={props.onUpstreamFilter}
       />
 
       <ServerCardsRow
@@ -273,6 +276,9 @@ function FilterBar(props: {
   onSearch: (s: string) => void
   status: '' | 'ok' | 'error'
   onStatus: (s: '' | 'ok' | 'error') => void
+  upstreams: string[]
+  upstreamFilter: string
+  onUpstreamFilter: (s: string) => void
 }) {
   return (
     <div className="filter-bar">
@@ -283,6 +289,17 @@ function FilterBar(props: {
         value={props.search}
         onChange={(e) => props.onSearch(e.target.value)}
       />
+      <select
+        className="select"
+        value={props.upstreamFilter}
+        onChange={(e) => props.onUpstreamFilter(e.target.value)}
+        title="Filter by server (mirrors the server card selection)"
+      >
+        <option value="">All servers</option>
+        {props.upstreams.map((u) => (
+          <option key={u} value={u}>{u}</option>
+        ))}
+      </select>
       <select
         className="select"
         value={props.status}
@@ -330,6 +347,7 @@ function ServerCardsRow(props: {
         onClick={() => onSelect('')}
         idle={false}
       />
+      <div className="server-cards-divider" aria-hidden="true" />
       {servers.map((s) => (
         <ServerCard
           key={s.name}
@@ -482,8 +500,10 @@ type ToolStats = {
 
 function StatsStrip({ stats }: { stats: ToolStats[] }) {
   return (
-    <div className="stats-strip">
-      {stats.map((s) => (
+    <div className="stats-strip-wrap">
+      <div className="stats-strip-label">Top tools</div>
+      <div className="stats-strip">
+        {stats.map((s) => (
         <div key={s.tool} className="stat-card">
           <div className="stat-card-tool mono">{s.tool}</div>
           <div className="stat-card-row">
@@ -506,6 +526,7 @@ function StatsStrip({ stats }: { stats: ToolStats[] }) {
           </div>
         </div>
       ))}
+      </div>
     </div>
   )
 }

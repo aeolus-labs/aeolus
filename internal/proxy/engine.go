@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -134,6 +135,85 @@ func (e *Engine) Reload(ctx context.Context, newUpstreams []upstream.Server, new
 		"failed", e.failureCount(),
 		"tools", e.toolCount(),
 	)
+	return nil
+}
+
+// ReconnectUpstream restarts a single upstream in place without
+// disturbing any others. The build closure produces a fresh
+// upstream.Server from the caller's config — Engine doesn't know how
+// to construct upstreams itself, so the caller (main.go) supplies
+// that. On success the old server is shut down only after the new one
+// has initialized, so callers never see a window with no upstream
+// answering for `name`.
+//
+// Returns an error if the named upstream isn't currently configured
+// (caller should use Reload for that case) or if the fresh server
+// fails to initialize.
+func (e *Engine) ReconnectUpstream(ctx context.Context, name string, build func() (upstream.Server, error)) error {
+	e.mu.Lock()
+	var oldIdx = -1
+	for i, u := range e.upstreams {
+		if u.Name() == name {
+			oldIdx = i
+			break
+		}
+	}
+	e.mu.Unlock()
+
+	fresh, err := build()
+	if err != nil {
+		return fmt.Errorf("build upstream %s: %w", name, err)
+	}
+
+	clientInfo := mcp.Info{Name: proxyName, Version: proxyVersion}
+	if _, err := fresh.Initialize(ctx, clientInfo); err != nil {
+		go fresh.Shutdown(2 * time.Second)
+		// Treat failed reconnect as a recorded failure so the dashboard
+		// can show why instead of silently keeping the old one.
+		e.recordFailure(name, err.Error())
+		return fmt.Errorf("initialize %s: %w", name, err)
+	}
+
+	// Swap atomically: cancel old watcher, replace slot (or append if
+	// the upstream was previously disabled / new), start new watcher.
+	e.mu.Lock()
+	var oldServer upstream.Server
+	var oldCancel context.CancelFunc
+	if oldIdx >= 0 && oldIdx < len(e.upstreams) {
+		oldServer = e.upstreams[oldIdx]
+		e.upstreams[oldIdx] = fresh
+		if oldIdx < len(e.cancels) {
+			oldCancel = e.cancels[oldIdx]
+		}
+	} else {
+		e.upstreams = append(e.upstreams, fresh)
+	}
+	watcherCtx, c := context.WithCancel(ctx)
+	if oldIdx >= 0 && oldIdx < len(e.cancels) {
+		e.cancels[oldIdx] = c
+	} else {
+		e.cancels = append(e.cancels, c)
+	}
+	e.mu.Unlock()
+
+	// Clear any stale failure for this upstream since reconnect succeeded.
+	e.failuresMu.Lock()
+	delete(e.failures, name)
+	e.failuresMu.Unlock()
+
+	go e.watchUpstreamNotifications(watcherCtx, fresh)
+	if oldCancel != nil {
+		oldCancel()
+	}
+	if oldServer != nil {
+		go oldServer.Shutdown(3 * time.Second)
+	}
+
+	if err := e.refreshUpstream(ctx, fresh); err != nil {
+		e.log.Error("reconnect_refresh_failed", "upstream", name, "error", err.Error())
+	}
+	e.broadcastToolsChanged()
+	e.log.Info("upstream_reconnected", "name", name, "tools", e.toolCount())
 	return nil
 }
 
