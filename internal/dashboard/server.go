@@ -66,6 +66,13 @@ type Server struct {
 	catalogSubscribers map[chan CatalogBatch]struct{}
 	catalogLoading     atomic.Bool
 
+	// configChangeSubs receives a tick every time the config is
+	// reloaded — by PUT /api/config or by the file watcher seeing a
+	// hand-edit. The dashboard subscribes via /api/config/stream so it
+	// can refetch when something changes underneath it.
+	configChangeMu   sync.Mutex
+	configChangeSubs map[chan struct{}]struct{}
+
 	maxRecent int
 	subBuffer int
 }
@@ -129,6 +136,7 @@ func New(addr string, log *slog.Logger, cfg *config.Config) *Server {
 		recent:             make([]Event, 0, 256),
 		catalog:            nil, // populated by background registry fetch
 		catalogSubscribers: make(map[chan CatalogBatch]struct{}),
+		configChangeSubs:   make(map[chan struct{}]struct{}),
 		mcpSessions:        make(map[string]*mcpSession),
 		maxRecent:          256,
 		subBuffer:          32,
@@ -261,6 +269,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/secrets/", s.handleSecret)
 	mux.HandleFunc("/api/upstreams/", s.handleUpstream)
 	mux.HandleFunc("/api/dashboard/state", s.handleDashboardState)
+	mux.HandleFunc("/api/config/stream", s.handleConfigStream)
 	mux.HandleFunc("/mcp", s.handleMCP)
 	if assets != nil {
 		mux.Handle("/", http.FileServer(http.FS(assets)))
@@ -357,6 +366,78 @@ func writeSSE(w io.Writer, payload any) error {
 	}
 	_, err = fmt.Fprintf(w, "data: %s\n\n", b)
 	return err
+}
+
+// NotifyConfigChanged is called when the file watcher reloads the
+// config after a hand-edit. Internally, PUT /api/config calls the
+// same broadcast directly.
+func (s *Server) NotifyConfigChanged() {
+	s.broadcastConfigChanged()
+}
+
+func (s *Server) broadcastConfigChanged() {
+	s.configChangeMu.Lock()
+	defer s.configChangeMu.Unlock()
+	for ch := range s.configChangeSubs {
+		select {
+		case ch <- struct{}{}:
+		default:
+			// Subscriber is slow; drop the tick — the next ping will
+			// catch them up since the dashboard re-fetches the whole
+			// config every time.
+		}
+	}
+}
+
+// handleConfigStream opens a long-lived SSE connection that fires
+// each time the config is reloaded. The dashboard re-fetches
+// /api/config on every event so hand-edits to aeolus.yaml are
+// reflected without the user pressing reload.
+func (s *Server) handleConfigStream(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	ch := make(chan struct{}, 4)
+	s.configChangeMu.Lock()
+	s.configChangeSubs[ch] = struct{}{}
+	s.configChangeMu.Unlock()
+	defer func() {
+		s.configChangeMu.Lock()
+		delete(s.configChangeSubs, ch)
+		s.configChangeMu.Unlock()
+	}()
+
+	// Initial ping so the client knows the stream is alive.
+	if err := writeSSE(w, map[string]string{"type": "ready"}); err != nil {
+		return
+	}
+	flusher.Flush()
+
+	heartbeat := time.NewTicker(20 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ch:
+			if err := writeSSE(w, map[string]string{"type": "config_changed"}); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-heartbeat.C:
+			if _, err := fmt.Fprintf(w, ": keepalive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 type statsResponse struct {
@@ -505,6 +586,8 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 	s.cfgMu.Lock()
 	s.cfg = &newCfg
 	s.cfgMu.Unlock()
+
+	s.broadcastConfigChanged()
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(&newCfg)

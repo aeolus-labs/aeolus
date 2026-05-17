@@ -22,6 +22,15 @@ export default function App() {
     updateDashState({ sidebar_collapsed: next })
   }
 
+  // openTour navigates to the Servers tab (where TourController lives)
+  // and then triggers the tour. Shared by the sidebar Help button and
+  // the Live tab empty state.
+  function openTour() {
+    sessionStorage.setItem('aeolus.tourPending', '1')
+    window.dispatchEvent(new Event('aeolus:open-tour'))
+    setView('servers')
+  }
+
   const [events, setEvents] = useState<ToolCallEvent[]>([])
   const [connected, setConnected] = useState(false)
   const [search, setSearch] = useState('')
@@ -106,19 +115,7 @@ export default function App() {
           <div className="sidebar-divider" />
           <button
             className="sidebar-toggle sidebar-help"
-            onClick={() => {
-              // Tour spotlights elements on the Servers page, so write
-              // a "pending open" flag and switch view. TourController
-              // reads the flag on mount (handles the cross-tab case)
-              // and also listens for the event (handles same-tab clicks
-              // when Settings is already mounted). Belt-and-suspenders
-              // is necessary because useEffect attaches the event
-              // listener *after* render, and a setTimeout-driven
-              // dispatch can fire too early.
-              sessionStorage.setItem('aeolus.tourPending', '1')
-              window.dispatchEvent(new Event('aeolus:open-tour'))
-              setView('servers')
-            }}
+            onClick={openTour}
             title="Show the guided tour"
             aria-label="Show the guided tour"
           >
@@ -137,6 +134,8 @@ export default function App() {
           filtered={filtered}
           stats={stats}
           upstreams={upstreams}
+          connected={connected}
+          onOpenTour={openTour}
           search={search}
           onSearch={setSearch}
           upstreamFilter={upstreamFilter}
@@ -238,6 +237,8 @@ function LiveView(props: {
   filtered: ToolCallEvent[]
   stats: ToolStats[]
   upstreams: string[]
+  connected: boolean
+  onOpenTour: () => void
   search: string
   onSearch: (s: string) => void
   upstreamFilter: string
@@ -245,7 +246,7 @@ function LiveView(props: {
   statusFilter: '' | 'ok' | 'error'
   onStatusFilter: (s: '' | 'ok' | 'error') => void
 }) {
-  const { events, filtered, stats, upstreams } = props
+  const { events, filtered, stats, upstreams, connected, onOpenTour } = props
   const [expanded, setExpanded] = useState<string | null>(null)
 
   const servers = useMemo(() => summarizeByServer(events, upstreams), [events, upstreams])
@@ -275,11 +276,11 @@ function LiveView(props: {
         <h2>Live tool calls</h2>
         <div className="calls-scroll">
           {filtered.length === 0 ? (
-            <div className="empty">
-              {events.length === 0
-                ? "No tool calls yet. Use your agent and they'll stream in here."
-                : 'No calls match the current filter.'}
-            </div>
+            events.length === 0 ? (
+              <LiveEmptyState connected={connected} onOpenTour={onOpenTour} />
+            ) : (
+              <div className="empty">No calls match the current filter.</div>
+            )
           ) : (
             <table className="calls-table">
               <thead>
@@ -675,6 +676,49 @@ function Stat({ label, value, tone = 'normal' }: { label: string; value: number;
     <div className="stat">
       <div className={`stat-value stat-${tone}`}>{value}</div>
       <div className="stat-label">{label}</div>
+    </div>
+  )
+}
+
+function LiveEmptyState({
+  connected,
+  onOpenTour,
+}: {
+  connected: boolean
+  onOpenTour: () => void
+}) {
+  return (
+    <div className="live-empty">
+      <div className="live-empty-illustration" aria-hidden="true">⏳</div>
+      <h3>No tool calls yet</h3>
+      {connected ? (
+        <>
+          <p>
+            Aeolus is connected and watching. Have your MCP client call a tool
+            and it'll stream in here in real time.
+          </p>
+          <p className="muted">
+            Each call shows its arguments, response, latency, and which client
+            made it. Click any row once they arrive to expand the JSON detail.
+          </p>
+        </>
+      ) : (
+        <>
+          <p>
+            The dashboard isn't currently connected to the daemon's event
+            stream.
+          </p>
+          <p className="muted">
+            Make sure <code className="mono">aeolus service status</code> reports
+            running, then refresh this page.
+          </p>
+        </>
+      )}
+      <div className="live-empty-actions">
+        <button className="btn-primary" onClick={onOpenTour}>
+          Show me the tour
+        </button>
+      </div>
     </div>
   )
 }

@@ -206,6 +206,17 @@ func (e *Engine) ReconnectUpstream(ctx context.Context, name string, build func(
 		oldCancel()
 	}
 	if oldServer != nil {
+		// Drop the old upstream's tool entries before fetching new ones.
+		// refreshUpstream filters by `entry.upstream == u` and gets
+		// passed the *new* upstream — so without this purge the stale
+		// tools from the old pointer would linger in toolMap forever.
+		e.toolMu.Lock()
+		for n, entry := range e.toolMap {
+			if entry.upstream == oldServer {
+				delete(e.toolMap, n)
+			}
+		}
+		e.toolMu.Unlock()
 		go oldServer.Shutdown(3 * time.Second)
 	}
 

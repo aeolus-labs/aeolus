@@ -400,6 +400,11 @@ func run(configPath string, dashboardPort int) error {
 				logger.Error("watcher_reload_failed", "error", err.Error())
 				return
 			}
+			// Tell any open dashboards to re-fetch /api/config so the
+			// hand-edit shows up without manual reload.
+			if dashSrv != nil {
+				dashSrv.NotifyConfigChanged()
+			}
 			logger.Info("watcher_reloaded")
 		}, logger)
 		if err != nil {

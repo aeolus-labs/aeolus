@@ -165,7 +165,27 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
       if (!r.ok) throw new Error(await r.text())
       const data = (await r.json()) as { tools: ProbedTool[] }
       setProbedTools(data.tools)
-      setSelectedTools(new Set(data.tools.map((t) => t.name)))
+      // Pre-select tools to match the upstream's current allow/deny
+      // state. For brand-new upstreams (no rules yet reference this
+      // name) we fall back to "select all" — the user is just adding
+      // a server and probably wants everything.
+      const allow = config.tools?.allow ?? []
+      const deny = config.tools?.deny ?? []
+      const prefix = `${name}.`
+      const hasRulesForThis =
+        allow.some((p) => p === `${name}.*` || p.startsWith(prefix)) ||
+        deny.some((p) => p === `${name}.*` || p.startsWith(prefix))
+      if (hasRulesForThis) {
+        setSelectedTools(
+          new Set(
+            data.tools
+              .filter((t) => isToolAllowed(`${name}.${t.name}`, allow, deny))
+              .map((t) => t.name),
+          ),
+        )
+      } else {
+        setSelectedTools(new Set(data.tools.map((t) => t.name)))
+      }
       setModalTab('tools')
       if (prefill) clearKnownBad(prefill.id)
     } catch (err: unknown) {
@@ -929,6 +949,23 @@ function uniqueUpstreamName(base: string, existing: string[]): string {
   let i = 2
   while (taken.has(`${seed}-${i}`)) i++
   return `${seed}-${i}`
+}
+
+// isToolAllowed mirrors the backend ToolFilter semantics so the
+// probe-result checkboxes can match what the engine actually allows.
+// Deny wins. Empty allow means everything not denied is allowed.
+// Otherwise allow is a whitelist. Patterns support trailing "*".
+function isToolAllowed(exposedName: string, allow: string[], deny: string[]): boolean {
+  for (const p of deny) if (globMatch(p, exposedName)) return false
+  if (allow.length === 0) return true
+  for (const p of allow) if (globMatch(p, exposedName)) return true
+  return false
+}
+
+function globMatch(pattern: string, name: string): boolean {
+  if (pattern === name) return true
+  if (pattern.endsWith('*')) return name.startsWith(pattern.slice(0, -1))
+  return false
 }
 
 function addAllowRules(

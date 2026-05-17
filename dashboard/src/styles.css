@@ -1809,6 +1809,43 @@ body {
   color: var(--text-muted);
 }
 
+/* Friendly empty state on the Live tab when no events have streamed
+   in yet. Sits inside the calls scroll area so the page chrome
+   doesn't shift. */
+.live-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 32px;
+  text-align: center;
+  gap: 8px;
+  color: var(--text);
+}
+
+.live-empty-illustration {
+  font-size: 48px;
+  opacity: 0.5;
+  margin-bottom: 4px;
+}
+
+.live-empty h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.live-empty p {
+  margin: 0;
+  max-width: 480px;
+  line-height: 1.5;
+  font-size: 13px;
+}
+
+.live-empty-actions {
+  margin-top: 12px;
+}
+
 /* Guided tour overlay (spotlight + tooltip). The shade is the dimmed
    page background; the spotlight is a transparent box that punches a
    hole in the shade via its own huge box-shadow. */
@@ -2401,75 +2438,6 @@ body {
   text-align: center;
 }
 
-/* Failure banner at the top of the Servers tab when one or more
-   upstreams can't be initialized. Each line names the upstream and
-   shows the engine's error message with a per-upstream Reconnect
-   button. */
-
-.failure-banner {
-  background: rgba(248, 113, 113, 0.08);
-  border: 1px solid var(--error, #f87171);
-  border-radius: 8px;
-  padding: 12px 16px;
-  margin: 8px 0 16px;
-  font-size: 13px;
-  color: var(--text);
-}
-
-.failure-banner-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 6px;
-}
-
-.failure-banner-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: var(--error, #f87171);
-  color: #fff;
-  font-weight: 700;
-  font-size: 12px;
-}
-
-.failure-banner-list {
-  margin: 0;
-  padding-left: 28px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.failure-banner-list li {
-  color: var(--text-muted);
-  word-break: break-word;
-}
-
-.failure-banner-list code {
-  color: var(--text);
-  margin-right: 4px;
-}
-
-.failure-banner-retry {
-  margin-left: 8px;
-  background: transparent;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text);
-  padding: 1px 8px;
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.failure-banner-retry:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
 /* "broken" pill in the server card header. Reuses .badge styling plus
    danger color from .badge-danger; this rule just spaces it. */
 .broken-pill {
@@ -2496,10 +2464,78 @@ body {
 }
 
 .card-failure-msg {
+  font-size: 13px;
+  color: var(--text);
+  word-break: break-word;
+  margin-bottom: 4px;
+}
+
+.card-failure-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.card-failure-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.card-failure-edit {
+  background: transparent;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--accent);
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.card-failure-edit:hover {
+  background: rgba(88, 166, 255, 0.08);
+}
+
+.card-failure-details {
+  font-size: 11px;
+}
+
+.card-failure-details summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  list-style: none;
+}
+
+.card-failure-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.card-failure-details summary:hover {
+  color: var(--text);
+}
+
+.card-failure-details summary::before {
+  content: '▸ ';
+}
+
+.card-failure-details[open] summary::before {
+  content: '▾ ';
+}
+
+.card-failure-raw {
+  display: block;
+  margin-top: 4px;
+  padding: 6px 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
   font-family: var(--mono);
   font-size: 11px;
   color: var(--text);
-  word-break: break-word;
+  word-break: break-all;
+  white-space: pre-wrap;
 }
 
 /* Scope pill — single "scoped" indicator on the server card when an

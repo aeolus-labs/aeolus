@@ -51,6 +51,27 @@ export default function Settings() {
     api.config().then(setConfig).catch((err) => setError(err.message))
   }, [])
 
+  // Subscribe to config-change broadcasts so hand-edits to aeolus.yaml
+  // (picked up by the daemon's file watcher) refresh the dashboard
+  // without a manual reload. The daemon emits one "config_changed"
+  // tick per reload — the PUT path inside this same tab also fires
+  // it, but that path already refetches synchronously, so the extra
+  // tick is harmless.
+  useEffect(() => {
+    const es = new EventSource('/api/config/stream')
+    es.onmessage = (msg) => {
+      try {
+        const data = JSON.parse(msg.data) as { type?: string }
+        if (data.type === 'config_changed') {
+          api.config().then(setConfig).catch(() => {})
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    return () => es.close()
+  }, [])
+
   // Refresh the failure map. Called on mount, on a 5s poll, and after
   // any mutation that might fix or surface new failures (toggle,
   // reconnect, save).
@@ -397,13 +418,6 @@ export default function Settings() {
 
       <TourController />
 
-      {Object.keys(failures).length > 0 && (
-        <FailureBanner failures={failures} onReconnect={(name) => {
-          const u = config.upstreams.find((x) => x.name === name)
-          if (u) reconnectUpstream(u)
-        }} />
-      )}
-
       <nav className="subtabs">
         <button
           className={`subtab ${settingsTab === 'upstreams' ? 'subtab-active' : ''}`}
@@ -652,6 +666,12 @@ export default function Settings() {
             setEditing(null)
             setPrefill(null)
             setKnownBad(loadKnownBad())
+            // Edit may have fixed (or newly introduced) an upstream
+            // failure. Pull the engine's current failure map so the
+            // card's broken pill / Last error block clears (or
+            // updates) immediately instead of waiting for the 5s
+            // background poll.
+            void refreshFailures()
           }}
         />
       )}
@@ -767,10 +787,7 @@ function UpstreamCard({
         {tab === 'setup' && (
           <>
             {failure && (
-              <div className="card-failure">
-                <div className="card-failure-label">Last error</div>
-                <code className="card-failure-msg">{failure}</code>
-              </div>
+              <FailureBlock raw={failure} onEdit={onEdit} />
             )}
             {transport === 'stdio' ? (
               <>
@@ -1002,6 +1019,136 @@ function RuleList({ label, rules, tone }: { label: string; rules: string[]; tone
   )
 }
 
+// FailureBlock displays an engine init/refresh error inside a server
+// card's Setup tab. Maps common Go-side error patterns to actionable
+// titles so the user knows what to fix; keeps the raw error under a
+// "Show details" expander for when the mapping doesn't help.
+function FailureBlock({
+  raw,
+  onEdit,
+}: {
+  raw: string
+  onEdit: () => void
+}) {
+  const friendly = friendlyUpstreamError(raw)
+  return (
+    <div className="card-failure">
+      <div className="card-failure-label">Last error</div>
+      <div className="card-failure-msg">{friendly.title}</div>
+      {friendly.hint && (
+        <div className="card-failure-hint">{friendly.hint}</div>
+      )}
+      <div className="card-failure-actions">
+        <button className="card-failure-edit" onClick={onEdit}>
+          Edit upstream →
+        </button>
+        {friendly.detail && (
+          <details className="card-failure-details">
+            <summary>Show full error</summary>
+            <code className="card-failure-raw">{friendly.detail}</code>
+          </details>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// friendlyUpstreamError takes a raw error string the engine recorded
+// (typically a Go net/http or os/exec wrapped error) and returns a
+// human-readable title + optional hint + the raw text. The caller
+// renders the title prominently and tucks the raw form under a
+// disclosure.
+type FriendlyError = { title: string; hint?: string; detail?: string }
+
+function friendlyUpstreamError(raw: string): FriendlyError {
+  // URL with no scheme (typo, forgot http://).
+  if (/unsupported protocol scheme/i.test(raw)) {
+    return {
+      title: 'The URL is invalid.',
+      hint: 'It needs to start with http:// or https://. Edit the upstream and re-probe.',
+      detail: raw,
+    }
+  }
+  // npx / brew / pipx etc. not on PATH that launchd can see.
+  const cmdMissing = /exec: "([^"]+)": executable file not found/.exec(raw)
+  if (cmdMissing) {
+    const cmd = cmdMissing[1]
+    return {
+      title: `Command "${cmd}" wasn't found on the daemon's PATH.`,
+      hint:
+        cmd === 'npx' || cmd === 'node'
+          ? 'Install Node.js, or run `aeolus service install --force` so the plist picks up your shell PATH again.'
+          : 'Install it, or make sure your shell PATH is correct and reinstall the service.',
+      detail: raw,
+    }
+  }
+  // TCP connect refused — server down.
+  if (/connection refused/i.test(raw)) {
+    return {
+      title: "Couldn't reach the server.",
+      hint: 'The host is up but nothing is listening on that port — make sure the MCP server is running.',
+      detail: raw,
+    }
+  }
+  // DNS failure.
+  if (/no such host/i.test(raw)) {
+    return {
+      title: "The hostname doesn't resolve.",
+      hint: 'Check the URL for typos. Localhost servers need to be running on the listed port.',
+      detail: raw,
+    }
+  }
+  // Network timeout.
+  if (/i\/o timeout|context deadline exceeded|Client\.Timeout/i.test(raw)) {
+    return {
+      title: 'The connection timed out.',
+      hint: 'The server may be slow or unreachable. Try Reconnect, or check the URL / network.',
+      detail: raw,
+    }
+  }
+  // TLS / certificate issues.
+  if (/x509:|tls:/i.test(raw)) {
+    return {
+      title: 'TLS handshake failed.',
+      hint:
+        "The server's certificate didn't validate. Common causes: self-signed cert, expired cert, wrong hostname.",
+      detail: raw,
+    }
+  }
+  // HTTP auth errors.
+  if (/\b401\b|\bunauthorized\b/i.test(raw)) {
+    return {
+      title: 'The server rejected the request as unauthorized.',
+      hint: 'Check the API token or Authorization header on this upstream.',
+      detail: raw,
+    }
+  }
+  if (/\b403\b|\bforbidden\b/i.test(raw)) {
+    return {
+      title: 'The server rejected the request as forbidden.',
+      hint: "The token is recognized but doesn't have permission. Check the token's scopes.",
+      detail: raw,
+    }
+  }
+  if (/\b404\b|not found/i.test(raw)) {
+    return {
+      title: 'The endpoint returned 404 Not Found.',
+      hint: 'Double-check the URL path. Many MCP servers expect a /mcp suffix.',
+      detail: raw,
+    }
+  }
+  // Server doesn't speak MCP correctly.
+  if (/protocol|MCP|jsonrpc|json-rpc/i.test(raw) && /(invalid|unexpected|parse)/i.test(raw)) {
+    return {
+      title: 'The server didn\'t speak MCP correctly.',
+      hint: 'It returned a malformed response. Likely not an MCP server, or wrong endpoint path.',
+      detail: raw,
+    }
+  }
+  // Generic fallback: show the raw message untouched.
+  return { title: raw }
+}
+
 function Row({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
   return (
     <div className="row">
@@ -1011,43 +1158,6 @@ function Row({ label, value, mono = false }: { label: string; value: string; mon
   )
 }
 
-// FailureBanner is shown at the top of the Servers tab whenever the
-// engine reports one or more upstreams that couldn't be initialized
-// or refreshed. Click an entry's Reconnect button to retry that
-// specific upstream without touching the others.
-function FailureBanner({
-  failures,
-  onReconnect,
-}: {
-  failures: Record<string, string>
-  onReconnect: (name: string) => void
-}) {
-  const names = Object.keys(failures)
-  return (
-    <div className="failure-banner">
-      <div className="failure-banner-head">
-        <span className="failure-banner-icon" aria-hidden="true">!</span>
-        <strong>
-          {names.length} upstream{names.length === 1 ? '' : 's'} not running
-        </strong>
-      </div>
-      <ul className="failure-banner-list">
-        {names.map((n) => (
-          <li key={n}>
-            <code className="mono">{n}</code>: {failures[n]}
-            <button
-              className="failure-banner-retry"
-              onClick={() => onReconnect(n)}
-              title={`Retry connecting to ${n}`}
-            >
-              Reconnect
-            </button>
-          </li>
-        ))}
-      </ul>
-    </div>
-  )
-}
 
 // ---- Workspace UI helpers ----
 

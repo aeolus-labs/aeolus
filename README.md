@@ -2,17 +2,18 @@
 
 A local daemon that gateways every MCP server you use through one dashboard.
 
-Aeolus runs as a long-lived background service on your laptop. It exposes one MCP endpoint (Streamable HTTP + a stdio bridge) that aggregates every MCP server you've configured — filesystem, github, slack, postgres, hosted servers, anything that speaks MCP. Any client — Claude Code, Cursor, GitHub Copilot, Zed, Continue, custom agents — connects to that one endpoint instead of wiring up each MCP server individually.
+Aeolus runs as a long-lived background service on your laptop. It exposes one MCP endpoint (Streamable HTTP + a stdio bridge) that aggregates every MCP server you've configured — filesystem, github, slack, postgres, hosted servers, anything that speaks MCP. Any client — Claude Code, Cursor, GitHub Copilot, Zed, Continue, custom agents — connects to that one endpoint instead of wiring up each MCP server individually. **Workspaces** let one daemon expose different tool sets per project, auto-detected by directory.
 
-> Status: **v0.4.0 — alpha.** Daemon architecture, single-binary, runs on macOS / Linux / Windows.
+> Status: **v0.5.x — alpha.** Daemon architecture, single binary, macOS service install today (Linux/Windows binaries run fine in the foreground).
 
 ## Why
 
-Plain MCP gives you tools but leaves three gaps:
+Plain MCP gives you tools but leaves four gaps:
 
 1. **Tool bloat.** Loading every tool from every connected MCP server burns context tokens and degrades model performance.
 2. **No audit trail.** When an agent calls a tool, nobody logs who, what, when, with what arguments.
 3. **No policy.** Any process on your machine can configure any MCP server — including ones that touch production.
+4. **No scoping.** Pointing Claude / Cursor / Zed at the right tools per project means hand-editing each one's config in each repo.
 
 Aeolus closes those gaps without changing how MCP servers or clients work.
 
@@ -39,9 +40,10 @@ Aeolus handles:
 
 - **Aggregation** — many MCP servers, one endpoint
 - **Namespacing** — tool names prefixed by upstream (`filesystem.read_file`) so collisions don't happen
+- **Workspaces** — group servers per project; auto-detected by directory so Claude/Cursor/Zed pick the right set without per-project config edits
 - **Filtering** — allow/deny rules per tool, with globs
 - **Secret management** — env values and HTTP headers can live in the OS keychain, never in YAML
-- **Observability** — every tool call logged; dashboard at `http://localhost:8765`
+- **Observability** — every tool call logged with arguments + response + client name + workspace; dashboard at `http://localhost:8765`
 - **Hot reload** — edit `aeolus.yaml` or use the dashboard editor; changes apply without disconnecting any client
 
 ## Install
@@ -253,30 +255,92 @@ Any value in `env:` or `headers:` can be `keychain:<name>`. Aeolus resolves it f
 
 Edits to `aeolus.yaml` (by hand or through the dashboard) are picked up immediately. Connected clients get a `tools/list_changed` notification so they refresh. Invalid configs are logged and ignored — the previous good config keeps running.
 
+## Workspaces (per-project tool sets)
+
+A **workspace** is a named subset of your upstreams. When an MCP client connects to Aeolus, the daemon resolves a workspace and exposes only that subset of tools.
+
+Resolution priority:
+
+1. Explicit `--workspace <name>` arg on `aeolus mcp`.
+2. The bridge's current working directory matches a workspace's `cwd_match`.
+3. A workspace literally named `default` (if defined) — used as the global fallback.
+4. Otherwise: only upstreams **not** in any workspace are exposed. (Scoped servers are exclusive to their scope.)
+
+### Example
+
+```yaml
+upstreams:
+  - { name: filesystem, command: npx, args: [...] }
+  - { name: github,     command: npx, args: [...] }
+  - { name: acme-db,    command: node, args: [./acme-db-server.js] }
+  - { name: research-arxiv, transport: http, url: https://arxiv-mcp.example.com/mcp }
+
+workspaces:
+  - name: acme-backend
+    include: [filesystem, github, acme-db]
+    cwd_match: ["~/code/acme-backend/**"]
+
+  - name: research
+    include: [filesystem, research-arxiv]
+    cwd_match: ["~/research/**"]
+```
+
+With this config:
+
+- Claude running in `~/code/acme-backend/services/api` → sees `filesystem.*`, `github.*`, `acme-db.*`.
+- Claude running in `~/research/papers` → sees `filesystem.*`, `research-arxiv.*`. Never sees `github` or `acme-db`.
+- Claude running anywhere else → sees nothing (since every upstream is scoped). Add a `default` workspace or leave one upstream unscoped if you want a global fallback.
+
+`cwd_match` patterns support:
+- `~/path` — `~` expansion to your home dir
+- exact path
+- trailing `/**` for "this directory or any descendant"
+
+Longest match wins so a more specific workspace outranks a broader one.
+
+### Per-project explicit
+
+If your client doesn't run from a stable cwd (e.g., Claude Desktop's `.app` launched from the dock), use an explicit `--workspace`:
+
+```json
+// <project>/.claude/settings.local.json
+{ "mcpServers": { "aeolus": { "command": "aeolus", "args": ["mcp", "--workspace", "acme-backend"] } } }
+```
+
+The dashboard's "Connect a client" button generates this snippet for you.
+
 ## The dashboard
 
 Visit `http://localhost:8765` (or run `aeolus open`).
 
-- **Servers** tab: connected upstreams with per-upstream Setup / Tools views; Add / Edit / Remove flow that probes new servers before saving; Catalog browser of ~2,600 MCP servers from the official MCP Registry, filterable by transport and auth.
-- **Live** tab: every tool call streamed in real time — time, upstream, tool, latency, status — with filters and per-tool stats (p50/p95).
+- **Guided tour** — auto-opens on first visit. Re-open anytime via the `Help` button at the bottom of the left sidebar.
+- **Servers tab**: every configured upstream with per-card Enable/Disable, Reconnect, and a Setup / Tools view. Workspace dropdown at the top to switch between scoped views; the active workspace shows its cwd-match patterns inline. `Connect a client →` button generates the exact JSON snippet for Claude / Cursor / VS Code Copilot / Zed. Broken upstreams show a red `broken` pill and the engine's last error inline.
+- **Catalog tab**: browse ~2,600 MCP servers from the official MCP Registry. Filter by transport / auth, infinite scroll, one-click Add.
+- **Live tab**: streaming tool calls — time, upstream, tool, client, latency, status. Click a row to expand syntax-highlighted JSON arguments and response, with a Copy button on each.
 
 ## CLI reference
 
 ```
-aeolus                       run as a daemon (foreground)
-aeolus service install       write the launchd plist
-aeolus service start         start the daemon as a launchd agent
-aeolus service stop          stop the daemon
-aeolus service status        running / not running
-aeolus service restart       stop + start
-aeolus service uninstall     stop + remove plist
-aeolus service logs [-f]     tail the daemon's stderr
+aeolus                                 run as a daemon (foreground)
+aeolus --config <path>                 daemon, custom config path
+aeolus --dashboard-port <n>            daemon, override dashboard port
 
-aeolus mcp                   stdio bridge for MCP clients (see snippets above)
-aeolus open                  open dashboard in default browser
-aeolus init                  write a starter aeolus.yaml
-aeolus --version             print version
-aeolus --help                full help
+aeolus service install [--force]       write the launchd plist (macOS)
+aeolus service start                   load + start via launchd
+aeolus service stop                    bootout
+aeolus service status                  running / loaded, not running / not loaded
+aeolus service restart                 in-place restart via kickstart
+aeolus service uninstall               bootout + remove plist
+aeolus service logs [-f] [-n N]        tail ~/Library/Logs/aeolus/aeolus.log
+
+aeolus mcp [--workspace <name>] [--daemon <url>] [--timeout <d>]
+                                       stdio bridge to a running daemon
+                                       (called by MCP clients — Claude / Cursor / etc.)
+
+aeolus open                            open dashboard in default browser
+aeolus init [--path <p>] [--force]     write a starter aeolus.yaml
+aeolus --version                       print version
+aeolus --help                          full help
 ```
 
 ## Repo layout
@@ -297,12 +361,24 @@ aeolus/
 └── Makefile                build orchestration
 ```
 
+## Persisted state
+
+| File | Owner | Contents |
+|---|---|---|
+| `~/.config/aeolus/aeolus.yaml` (or `$XDG_CONFIG_HOME/aeolus/aeolus.yaml`) | you | Upstreams, workspaces, tool rules, log/dashboard settings. Hand-editable. |
+| `~/.local/share/aeolus/events.jsonl` (or `$XDG_DATA_HOME/aeolus/events.jsonl`) | daemon | Tool-call audit log. Append-only with automatic compaction; the dashboard reads its tail on start. |
+| `~/.local/share/aeolus/dashboard_state.json` | daemon | UI preferences (tour dismissed, sidebar collapsed). Survives browser switches. |
+| `~/Library/LaunchAgents/com.aeolus-labs.aeolus.plist` (macOS) | `aeolus service` | launchd unit. PATH inherited from your interactive shell at install time. |
+| `~/Library/Logs/aeolus/aeolus.log` (macOS) | launchd | Daemon stderr. |
+
+OS keychain: any value in `env:` or `headers:` that starts with `keychain:` is resolved at spawn time. Secrets never live in YAML.
+
 ## What's next
 
 - macOS `.app` bundle so a Dock icon launches the dashboard.
 - Linux systemd / Windows service equivalents to `aeolus service`.
-- Auto-update path for installed daemons.
-- Distribution: binary releases on GitHub + Homebrew tap.
+- Per-client filtering (different tool sets for Copilot vs. Claude even when running in the same dir).
+- Per-tool toggles in the dashboard (today: workspace-level scoping + global allow/deny patterns).
 
 ## License
 
