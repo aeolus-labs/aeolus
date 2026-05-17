@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { AeolusConfig, CatalogEntry, Upstream } from './types'
 import { applyCatalogFilters, type CatalogFilters } from './catalogFilters'
 import { clearKnownBad, markKnownBad } from './knownBad'
@@ -34,6 +34,20 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
   const [envEntries, setEnvEntries] = useState<EnvRow[]>(parseEnv(editing?.env))
   const [url, setUrl] = useState(editing?.url ?? '')
   const [headerEntries, setHeaderEntries] = useState<EnvRow[]>(parseHeaders(editing?.headers))
+  // Workspace membership: which workspaces include this upstream. Edits
+  // here are persisted along with the rest of the upstream's config on
+  // save, so the user picks everything in one place.
+  const workspacesList = config.workspaces ?? []
+  const initialMemberships = new Set<string>(
+    workspacesList
+      .filter((p) =>
+        editing
+          ? (p.include ?? []).includes(editing.name)
+          : false,
+      )
+      .map((p) => p.name),
+  )
+  const [workspaceMemberships, setWorkspaceMemberships] = useState<Set<string>>(initialMemberships)
   const [catalogSearch, setCatalogSearch] = useState('')
   const [catalogFilters, setCatalogFilters] = useState<CatalogFilters>({
     transport: 'all',
@@ -61,7 +75,7 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
   })()
 
   const filteredCatalog = useMemo(
-    () => applyCatalogFilters(catalog, catalogSearch, catalogFilters).slice(0, 40),
+    () => applyCatalogFilters(catalog, catalogSearch, catalogFilters),
     [catalog, catalogSearch, catalogFilters]
   )
 
@@ -206,19 +220,40 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
         ? config.upstreams.map((u) => (u.name === editing!.name ? newUpstream : u))
         : [...config.upstreams, newUpstream]
 
-      // Strip any existing allow rules that apply to this upstream so we can
-      // replace them cleanly from the new tool selection.
+      // If the user re-probed in this session we replace the upstream's
+      // allow rules from the new selection; otherwise we leave them
+      // untouched so a Workspaces-only edit doesn't accidentally wipe
+      // previously-curated tool rules.
       const oldName = editing?.name ?? name
-      const allowSansSelf = stripUpstreamRules(config.tools.allow, oldName)
+      const reprobed = probedTools !== null
+      const allowSansSelf = reprobed
+        ? stripUpstreamRules(config.tools.allow, oldName)
+        : (config.tools.allow ?? [])
       const otherUpstreams = nextUpstreams.filter((u) => u.name !== name)
+
+      // Apply workspace memberships from the modal: rewrite each workspace's
+      // include list to add or remove this upstream (using the new
+      // name) based on the user's checkbox state.
+      const oldUpstreamName = editing?.name ?? name
+      const nextWorkspaces = workspacesList.map((p) => {
+        const cur = p.include ?? []
+        // Strip any prior reference to this upstream (covers both
+        // rename and toggle-off).
+        const without = cur.filter((n) => n !== oldUpstreamName && n !== name)
+        const include = workspaceMemberships.has(p.name) ? [...without, name] : without
+        return { ...p, include }
+      })
 
       const next: AeolusConfig = {
         ...config,
         upstreams: nextUpstreams,
         tools: {
-          allow: addAllowRules(allowSansSelf, name, selectedTools, probedTools ?? [], otherUpstreams),
+          allow: reprobed
+            ? addAllowRules(allowSansSelf, name, selectedTools, probedTools ?? [], otherUpstreams)
+            : allowSansSelf,
           deny: config.tools.deny ?? [],
         },
+        workspaces: nextWorkspaces,
       }
 
       const r = await fetch('/api/config', {
@@ -302,9 +337,19 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
               </button>
               <button
                 className={`tab ${modalTab === 'tools' ? 'tab-active' : ''}`}
-                onClick={() => probedTools && setModalTab('tools')}
-                disabled={!probedTools}
-                title={probedTools ? '' : 'Probe first to discover tools'}
+                onClick={() => {
+                  setModalTab('tools')
+                  // In edit mode, clicking Tools probes automatically the
+                  // first time so the user sees a fresh tool list from the
+                  // running upstream instead of having to click probe
+                  // manually. For new upstreams without prefill, the user
+                  // still drives the probe explicitly from Setup.
+                  if (isEdit && !probedTools && !probing) {
+                    void probe()
+                  }
+                }}
+                disabled={!isEdit && !probedTools}
+                title={!isEdit && !probedTools ? 'Probe first to discover tools' : ''}
               >
                 Tools{probedTools ? ` (${selectedTools.size}/${probedTools.length})` : ''}
               </button>
@@ -330,9 +375,29 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
                 onUrl={setUrl}
                 headerEntries={headerEntries}
                 onHeaderEntries={setHeaderEntries}
+                workspaces={workspacesList}
+                memberships={workspaceMemberships}
+                onToggleMembership={(workspaceName, next) => {
+                  setWorkspaceMemberships((prev) => {
+                    const out = new Set(prev)
+                    if (next) out.add(workspaceName)
+                    else out.delete(workspaceName)
+                    return out
+                  })
+                }}
               />
             )}
 
+            {modalTab === 'tools' && !probedTools && probing && (
+              <div className="modal-body modal-body-empty">
+                Probing tools…
+              </div>
+            )}
+            {modalTab === 'tools' && !probedTools && !probing && (
+              <div className="modal-body modal-body-empty">
+                No tools loaded yet. Go to Setup and click Probe.
+              </div>
+            )}
             {modalTab === 'tools' && probedTools && (
               <ToolPicker
                 tools={probedTools}
@@ -358,11 +423,13 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
               >
                 {probing ? 'Probing…' : probedTools ? 'Re-probe' : 'Probe tools'}
               </button>
-              {probedTools && (
+              {(probedTools || isEdit) && (
                 <button className="btn-primary" onClick={save} disabled={saving}>
                   {saving
                     ? 'Saving…'
-                    : `Save (${selectedTools.size} tool${selectedTools.size === 1 ? '' : 's'})`}
+                    : probedTools
+                      ? `Save (${selectedTools.size} tool${selectedTools.size === 1 ? '' : 's'})`
+                      : 'Save'}
                 </button>
               )}
             </footer>
@@ -373,6 +440,8 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
   )
 }
 
+const CATALOG_PICK_PAGE_SIZE = 40
+
 function CatalogStep(props: {
   catalog: CatalogEntry[]
   search: string
@@ -381,6 +450,39 @@ function CatalogStep(props: {
   onFilters: (f: CatalogFilters) => void
   onPick: (e: CatalogEntry) => void
 }) {
+  const [page, setPage] = useState(1)
+  const visible = props.catalog.slice(0, page * CATALOG_PICK_PAGE_SIZE)
+  const hasMore = visible.length < props.catalog.length
+
+  // Reset to first page when the filters / search change.
+  useEffect(() => {
+    setPage(1)
+  }, [props.search, props.filters.transport, props.filters.auth])
+
+  // IntersectionObserver scoped to the .catalog-list scrolling container,
+  // so the sentinel fires when scrolling *inside* the modal list (not
+  // when the whole page scrolls).
+  const listRef = useRef<HTMLDivElement | null>(null)
+  const sentinelRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!hasMore) return
+    const list = listRef.current
+    const sentinel = sentinelRef.current
+    if (!list || !sentinel) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            setPage((p) => p + 1)
+          }
+        }
+      },
+      { root: list, rootMargin: '120px' },
+    )
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [hasMore, visible.length])
+
   return (
     <div className="modal-body">
       <input
@@ -392,14 +494,24 @@ function CatalogStep(props: {
         autoFocus
       />
       <ModalCatalogFilterBar filters={props.filters} onChange={props.onFilters} />
-      <div className="catalog-list">
-        {props.catalog.map((e) => (
+      <div className="catalog-list" ref={listRef}>
+        {visible.map((e) => (
           <button key={e.id} className="catalog-pick" onClick={() => props.onPick(e)}>
             <div className="catalog-pick-name">{e.name}</div>
             <div className="catalog-pick-desc">{e.description}</div>
             <div className="catalog-pick-id mono">{e.id}</div>
           </button>
         ))}
+        {hasMore && (
+          <div ref={sentinelRef} className="catalog-sentinel">
+            Loading more…
+          </div>
+        )}
+        {!hasMore && visible.length > 0 && (
+          <div className="catalog-sentinel catalog-sentinel-done">
+            {visible.length} entries
+          </div>
+        )}
       </div>
     </div>
   )
@@ -445,6 +557,9 @@ function FormStep(props: {
   onUrl: (s: string) => void
   headerEntries: EnvRow[]
   onHeaderEntries: (e: EnvRow[]) => void
+  workspaces: { name: string }[]
+  memberships: Set<string>
+  onToggleMembership: (name: string, next: boolean) => void
 }) {
   return (
     <div className="modal-body">
@@ -524,6 +639,18 @@ function FormStep(props: {
             <EnvEditor entries={props.headerEntries} onChange={props.onHeaderEntries} />
           </Field>
         </>
+      )}
+      {props.workspaces.length > 0 && (
+        <Field
+          label="Workspaces"
+          hint="Scoped: only visible in the checked workspaces. Unchecked everywhere: global (visible when no workspace is active)."
+        >
+          <WorkspacePickerButton
+            workspaces={props.workspaces}
+            memberships={props.memberships}
+            onToggleMembership={props.onToggleMembership}
+          />
+        </Field>
       )}
     </div>
   )
@@ -657,6 +784,123 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
         {hint && <span className="field-hint"> · {hint}</span>}
       </label>
       {children}
+    </div>
+  )
+}
+
+function WorkspacePickerButton(props: {
+  workspaces: { name: string }[]
+  memberships: Set<string>
+  onToggleMembership: (name: string, next: boolean) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const checkedNames = props.workspaces
+    .map((p) => p.name)
+    .filter((n) => props.memberships.has(n))
+
+  return (
+    <>
+      <button
+        type="button"
+        className="workspace-picker-button"
+        onClick={() => setOpen(true)}
+      >
+        <span className="workspace-picker-button-label">
+          {checkedNames.length === 0
+            ? 'Global only — not in any workspace'
+            : `In ${checkedNames.length} workspace${checkedNames.length === 1 ? '' : 's'}`}
+        </span>
+        {checkedNames.length > 0 && (
+          <span className="workspace-picker-button-chips">
+            {checkedNames.slice(0, 3).map((n) => (
+              <span key={n} className="workspace-picker-button-chip mono" title={n}>
+                {n}
+              </span>
+            ))}
+            {checkedNames.length > 3 && (
+              <span className="workspace-picker-button-chip muted">
+                +{checkedNames.length - 3}
+              </span>
+            )}
+          </span>
+        )}
+        <span className="workspace-picker-button-arrow">▾</span>
+      </button>
+      {open && (
+        <WorkspacePickerModal
+          workspaces={props.workspaces}
+          memberships={props.memberships}
+          onToggleMembership={props.onToggleMembership}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
+  )
+}
+
+function WorkspacePickerModal(props: {
+  workspaces: { name: string }[]
+  memberships: Set<string>
+  onToggleMembership: (name: string, next: boolean) => void
+  onClose: () => void
+}) {
+  const [query, setQuery] = useState('')
+  const q = query.trim().toLowerCase()
+  const visible = q
+    ? props.workspaces.filter((p) => p.name.toLowerCase().includes(q))
+    : props.workspaces
+  const checkedCount = props.workspaces.filter((p) =>
+    props.memberships.has(p.name),
+  ).length
+
+  return (
+    <div className="modal-shade modal-shade-nested" onClick={props.onClose}>
+      <div className="modal modal-narrow" onClick={(e) => e.stopPropagation()}>
+        <header className="modal-header">
+          <h2>Workspaces · {checkedCount} of {props.workspaces.length} selected</h2>
+          <button className="modal-close" onClick={props.onClose} aria-label="Close">×</button>
+        </header>
+        <div className="modal-body">
+          <input
+            type="search"
+            className="text-input"
+            placeholder="Filter workspaces…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            autoFocus
+          />
+          <div className="workspace-picker-list">
+            {visible.map((p) => {
+              const checked = props.memberships.has(p.name)
+              return (
+                <label
+                  key={p.name}
+                  className={`workspace-picker-row ${checked ? 'workspace-picker-row-on' : ''}`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={(e) => props.onToggleMembership(p.name, e.target.checked)}
+                  />
+                  <span className="mono workspace-picker-row-name" title={p.name}>
+                    {p.name}
+                  </span>
+                </label>
+              )
+            })}
+            {visible.length === 0 && (
+              <div className="add-existing-empty">
+                No workspaces match &ldquo;{query}&rdquo;.
+              </div>
+            )}
+          </div>
+        </div>
+        <footer className="modal-footer">
+          <button className="btn-primary" onClick={props.onClose}>
+            Done
+          </button>
+        </footer>
+      </div>
     </div>
   )
 }

@@ -7,7 +7,7 @@ import (
 
 // handleUpstream multiplexes /api/upstreams/{name}/... endpoints. Today
 // just /reconnect lives here; future additions (per-upstream tool toggle,
-// pause/resume, profile membership) will slot in beside it.
+// pause/resume, workspace membership) will slot in beside it.
 func (s *Server) handleUpstream(w http.ResponseWriter, r *http.Request) {
 	// Strip the /api/upstreams/ prefix and split into name + verb.
 	rest := strings.TrimPrefix(r.URL.Path, "/api/upstreams/")

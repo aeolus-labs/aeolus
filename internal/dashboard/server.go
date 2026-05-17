@@ -33,6 +33,7 @@ type Event struct {
 	LatencyMs int64           `json:"latency_ms"`
 	Status    string          `json:"status"`
 	Client    string          `json:"client,omitempty"`
+	Workspace string          `json:"workspace,omitempty"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
 	Response  json.RawMessage `json:"response,omitempty"`
 }
@@ -54,6 +55,7 @@ type Server struct {
 	engine McpEngine // nil until SetEngine is called
 
 	events *eventStore // nil = persistence disabled (in-memory only)
+	state  *stateStore // nil = dashboard state persistence disabled
 
 	mcpMu       sync.Mutex
 	mcpSessions map[string]*mcpSession
@@ -73,7 +75,7 @@ type Server struct {
 type McpEngine interface {
 	HandleInitialize(clientInfo mcp.Info) *mcp.InitializeResult
 	ListTools() []mcp.Tool
-	CallTool(ctx context.Context, name string, arguments json.RawMessage, client string) *mcp.Message
+	CallTool(ctx context.Context, name string, arguments json.RawMessage, client, workspace string) *mcp.Message
 	SubscribeToolsChanged() (<-chan struct{}, func())
 	ShuttingDown() <-chan struct{}
 }
@@ -87,6 +89,10 @@ type mcpSession struct {
 	initialized bool
 	lastSeen    time.Time
 	clientName  string
+	// workspaceName is the resolved workspace for this session: explicit
+	// --workspace flag → CWD match → "default" → "". Tools/list and
+	// tools/call are filtered against it.
+	workspaceName string
 }
 
 const (
@@ -153,6 +159,22 @@ func (s *Server) EnableEventPersistence(path string) {
 	count := len(s.recent)
 	s.mu.Unlock()
 	s.log.Info("event_persistence_enabled", "path", path, "restored", count)
+}
+
+// EnableStatePersistence opens (or creates) a JSON file at path that
+// stores small UI preferences (tour dismissed, sidebar collapsed,
+// etc.). Failure to open just disables the /api/dashboard/state
+// endpoint — the dashboard falls back to in-memory defaults.
+func (s *Server) EnableStatePersistence(path string) {
+	store, err := openStateStore(path)
+	if err != nil {
+		s.log.Warn("dashboard_state_disabled", "path", path, "error", err.Error())
+		return
+	}
+	s.mu.Lock()
+	s.state = store
+	s.mu.Unlock()
+	s.log.Info("dashboard_state_enabled", "path", path)
 }
 
 // Close releases any resources Server owns (currently just the events
@@ -233,6 +255,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/probe", s.handleProbe)
 	mux.HandleFunc("/api/secrets/", s.handleSecret)
 	mux.HandleFunc("/api/upstreams/", s.handleUpstream)
+	mux.HandleFunc("/api/dashboard/state", s.handleDashboardState)
 	mux.HandleFunc("/mcp", s.handleMCP)
 	if assets != nil {
 		mux.Handle("/", http.FileServer(http.FS(assets)))

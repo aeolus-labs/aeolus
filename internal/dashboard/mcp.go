@@ -63,6 +63,22 @@ func (s *Server) handleMCPPost(w http.ResponseWriter, r *http.Request) {
 		}
 		sessID = newSessionID()
 		s.openSession(sessID)
+		// Resolve workspace from the bridge's request headers. Explicit
+		// X-Aeolus-Workspace wins; otherwise we match X-Aeolus-Cwd
+		// against configured workspace cwd_match patterns; otherwise we
+		// fall back to a workspace literally named "default", and
+		// finally to "global" (unscoped) view.
+		s.cfgMu.RLock()
+		cfg := s.cfg
+		s.cfgMu.RUnlock()
+		workspace := ""
+		if cfg != nil {
+			workspace = cfg.ResolveWorkspace(
+				strings.TrimSpace(r.Header.Get("X-Aeolus-Workspace")),
+				strings.TrimSpace(r.Header.Get("X-Aeolus-Cwd")),
+			)
+		}
+		s.setSessionWorkspace(sessID, workspace)
 		w.Header().Set("Mcp-Session-Id", sessID)
 	} else if !s.touchSession(sessID) {
 		http.Error(w, "Unknown or expired session — start a new one with an initialize call.", http.StatusBadRequest)
@@ -100,7 +116,9 @@ func (s *Server) routeMCPRequest(ctx context.Context, sessID string, msg *mcp.Me
 		return &mcp.Message{Result: b}
 
 	case mcp.MethodToolsList:
+		workspace := s.sessionWorkspace(sessID)
 		tools := s.engine.ListTools()
+		tools = s.filterToolsByScope(tools, workspace)
 		b, _ := json.Marshal(mcp.ToolsListResult{Tools: tools})
 		return &mcp.Message{Result: b}
 
@@ -111,7 +129,18 @@ func (s *Server) routeMCPRequest(ctx context.Context, sessID string, msg *mcp.Me
 				return &mcp.Message{Error: &mcp.RPCError{Code: -32602, Message: "Invalid params: " + err.Error()}}
 			}
 		}
-		return s.engine.CallTool(ctx, params.Name, params.Arguments, s.sessionClient(sessID))
+		workspace := s.sessionWorkspace(sessID)
+		if !s.toolAllowedInScope(params.Name, workspace) {
+			scopeLabel := workspace
+			if scopeLabel == "" {
+				scopeLabel = "global (unscoped servers only)"
+			}
+			return &mcp.Message{Error: &mcp.RPCError{
+				Code:    -32601,
+				Message: "Tool not available in " + scopeLabel + ": " + params.Name,
+			}}
+		}
+		return s.engine.CallTool(ctx, params.Name, params.Arguments, s.sessionClient(sessID), workspace)
 
 	default:
 		return &mcp.Message{Error: &mcp.RPCError{Code: -32601, Message: "Method not found: " + msg.Method}}
@@ -233,6 +262,98 @@ func (s *Server) sessionClient(id string) string {
 		return sess.clientName
 	}
 	return "unknown"
+}
+
+// setSessionWorkspace binds the resolved workspace to a session at
+// initialize time.
+func (s *Server) setSessionWorkspace(id, workspace string) {
+	s.mcpMu.Lock()
+	defer s.mcpMu.Unlock()
+	if sess, ok := s.mcpSessions[id]; ok {
+		sess.workspaceName = workspace
+	}
+}
+
+// sessionWorkspace returns the workspace bound to a session. Empty
+// string means "global" — only unscoped upstreams visible.
+func (s *Server) sessionWorkspace(id string) string {
+	s.mcpMu.Lock()
+	defer s.mcpMu.Unlock()
+	if sess, ok := s.mcpSessions[id]; ok {
+		return sess.workspaceName
+	}
+	return ""
+}
+
+// filterToolsByScope drops tools whose owning upstream isn't visible
+// in the current scope. The scope is:
+//   - workspace == ""      → only unscoped upstreams (not in any workspace)
+//   - workspace valid      → only that workspace's Include list
+//   - workspace unknown    → no filter (permissive)
+//
+// Upstream name is the part of the exposed tool name before the first
+// ".". Tools without a "." prefix (shouldn't happen for upstream
+// tools, but guard anyway) pass through unfiltered.
+func (s *Server) filterToolsByScope(tools []mcp.Tool, workspace string) []mcp.Tool {
+	visible, applyFilter := s.scopeVisibleUpstreams(workspace)
+	if !applyFilter {
+		return tools
+	}
+	set := make(map[string]struct{}, len(visible))
+	for _, n := range visible {
+		set[n] = struct{}{}
+	}
+	out := make([]mcp.Tool, 0, len(tools))
+	for _, t := range tools {
+		i := strings.IndexByte(t.Name, '.')
+		if i <= 0 {
+			continue // skip malformed; never expose
+		}
+		if _, ok := set[t.Name[:i]]; ok {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// toolAllowedInScope gates tools/call. True when the tool's upstream
+// is visible in the current scope (or the scope is permissive).
+func (s *Server) toolAllowedInScope(exposedName, workspace string) bool {
+	visible, applyFilter := s.scopeVisibleUpstreams(workspace)
+	if !applyFilter {
+		return true
+	}
+	i := strings.IndexByte(exposedName, '.')
+	if i <= 0 {
+		return false
+	}
+	upstream := exposedName[:i]
+	for _, n := range visible {
+		if n == upstream {
+			return true
+		}
+	}
+	return false
+}
+
+// scopeVisibleUpstreams resolves a workspace name to the set of
+// upstream names a session in that scope is allowed to see. The second
+// return is false when the caller should not filter at all (unknown
+// workspace — permissive fallback so a broken config doesn't surface
+// zero tools).
+func (s *Server) scopeVisibleUpstreams(workspace string) ([]string, bool) {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	if s.cfg == nil {
+		return nil, false
+	}
+	if workspace == "" {
+		return s.cfg.UnscopedUpstreams(), true
+	}
+	if s.cfg.WorkspaceByName(workspace) == nil {
+		return nil, false
+	}
+	return s.cfg.VisibleUpstreams(workspace), true
 }
 
 // touchSession updates lastSeen and returns whether the session is still

@@ -302,9 +302,10 @@ func (e *Engine) ListTools() []mcp.Tool {
 
 // CallTool routes a tools/call to the owning upstream and returns the
 // response or an MCP-style error message. The observer hook fires once
-// with the arguments, response, and originating client so the dashboard
-// can show per-call detail and per-client attribution.
-func (e *Engine) CallTool(ctx context.Context, exposed string, arguments json.RawMessage, client string) *mcp.Message {
+// with the arguments, response, originating client, and resolved
+// workspace so the dashboard can show per-call detail and per-client /
+// per-project attribution.
+func (e *Engine) CallTool(ctx context.Context, exposed string, arguments json.RawMessage, client, workspace string) *mcp.Message {
 	e.toolMu.RLock()
 	entry, ok := e.toolMap[exposed]
 	e.toolMu.RUnlock()
@@ -336,7 +337,7 @@ func (e *Engine) CallTool(ctx context.Context, exposed string, arguments json.Ra
 			"error", err.Error(),
 		)
 		errResp, _ := json.Marshal(map[string]string{"transport_error": err.Error()})
-		e.observe(exposed, entry.upstream.Name(), latency, "transport_error", started, client, arguments, errResp)
+		e.observe(exposed, entry.upstream.Name(), latency, "transport_error", started, client, workspace, arguments, errResp)
 		return errorMessage(-32603, "Upstream error: "+err.Error())
 	}
 
@@ -356,7 +357,7 @@ func (e *Engine) CallTool(ctx context.Context, exposed string, arguments json.Ra
 	} else {
 		responseBody = resp.Result
 	}
-	e.observe(exposed, entry.upstream.Name(), latency, status, started, client, arguments, responseBody)
+	e.observe(exposed, entry.upstream.Name(), latency, status, started, client, workspace, arguments, responseBody)
 
 	return &mcp.Message{
 		JSONRPC: "2.0",
@@ -400,7 +401,7 @@ func (e *Engine) broadcastToolsChanged() {
 // still preserving full payloads for the vast majority of real calls.
 const maxObservationPayload = 16 << 10
 
-func (e *Engine) observe(tool, up string, latency time.Duration, status string, when time.Time, client string, args, response json.RawMessage) {
+func (e *Engine) observe(tool, up string, latency time.Duration, status string, when time.Time, client, workspace string, args, response json.RawMessage) {
 	if e.observer == nil {
 		return
 	}
@@ -411,6 +412,7 @@ func (e *Engine) observe(tool, up string, latency time.Duration, status string, 
 		Latency:   latency,
 		Status:    status,
 		Client:    client,
+		Workspace: workspace,
 		Arguments: capPayload(args),
 		Response:  capPayload(response),
 	})

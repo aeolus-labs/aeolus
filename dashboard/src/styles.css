@@ -685,6 +685,26 @@ body {
   border-top: 1px solid var(--border);
 }
 
+.catalog-sentinel {
+  grid-column: 1 / -1;
+  padding: 16px;
+  text-align: center;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-muted);
+}
+
+.catalog-list .catalog-sentinel {
+  /* Same look inside the flex column list; the grid-column rule above
+     is a no-op outside a grid context. */
+  align-self: stretch;
+}
+
+.catalog-sentinel-done {
+  opacity: 0.6;
+}
+
 .catalog-grid::-webkit-scrollbar {
   width: 10px;
 }
@@ -1163,6 +1183,13 @@ body {
   gap: 14px;
 }
 
+.modal-body-empty {
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
 .modal-footer {
   display: flex;
   justify-content: flex-end;
@@ -1425,6 +1452,7 @@ body {
   color: var(--text-muted);
   margin-top: 2px;
 }
+
 
 /* Live view layout: header items fixed, calls table area scrollable. */
 
@@ -1724,6 +1752,617 @@ body {
 
 .muted {
   color: var(--text-muted);
+}
+
+/* Guided tour overlay (spotlight + tooltip). The shade is the dimmed
+   page background; the spotlight is a transparent box that punches a
+   hole in the shade via its own huge box-shadow. */
+
+.tour-shade {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 10000;
+  /* The tour is read-only while open; the shade swallows every click
+     so the user can't accidentally trigger underlying UI. They advance
+     with Next / Back or close with Skip. */
+  cursor: default;
+}
+
+.tour-spotlight {
+  position: fixed;
+  border-radius: 8px;
+  border: 2px solid var(--accent);
+  /* Huge spread shadow forms the dim overlay around the cutout; the
+     element body stays transparent. */
+  box-shadow:
+    0 0 0 4px rgba(88, 166, 255, 0.18),
+    0 0 0 9999px rgba(0, 0, 0, 0.55);
+  background: transparent;
+  z-index: 10001;
+  pointer-events: none;
+  /* No transition — snap instantly between step targets. */
+}
+
+.tour-tooltip {
+  position: fixed;
+  z-index: 10002;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+  min-width: 280px;
+}
+
+.tour-tooltip-step {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.tour-tooltip-title {
+  margin: 0 0 6px;
+  font-size: 15px;
+  color: var(--text);
+}
+
+.tour-tooltip-body {
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+.tour-tooltip-body p {
+  margin: 0 0 8px;
+}
+
+.tour-tooltip-body p:last-child {
+  margin-bottom: 0;
+}
+
+.tour-tooltip-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tour-tooltip-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.tour-skip {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+}
+
+.tour-skip:hover {
+  color: var(--text);
+}
+
+/* Bottom-of-sidebar help button. Same shape as the Collapse toggle so
+   the two read as a paired pair, separated by a thin divider. */
+
+.sidebar-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 6px 8px;
+}
+
+.sidebar-help {
+  color: var(--text-muted);
+}
+
+.sidebar-help:hover {
+  color: var(--accent);
+}
+
+/* Workspace bar at the top of the Servers tab */
+
+.workspace-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 0 8px;
+  flex-wrap: wrap;
+  flex: 0 0 auto;
+}
+
+.workspace-bar-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+/* Reusable Dropdown component (replaces native <select> everywhere
+   so long option labels can ellipsis cleanly with tooltips). */
+
+.dropdown {
+  position: relative;
+  width: 200px;
+  flex-shrink: 0;
+}
+
+.dropdown-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  /* Extra right padding keeps the arrow visually aligned with other
+     right-edge UI (custom select arrows, etc). */
+  padding: 7px 30px 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+  height: 32px;
+  position: relative;
+  transition: border-color 0.12s;
+}
+
+.dropdown-button:hover {
+  border-color: var(--text-muted);
+}
+
+.dropdown-current {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dropdown-arrow {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+}
+
+.dropdown-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  width: 100%;
+  max-height: 320px;
+  overflow-y: auto;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  z-index: 50;
+  padding: 4px 0;
+}
+
+.dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.dropdown-item:hover {
+  background: var(--bg-row-hover);
+}
+
+.dropdown-item-selected {
+  color: var(--accent);
+}
+
+.dropdown-item-accent {
+  color: var(--accent);
+}
+
+.dropdown-item-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dropdown-check {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.dropdown-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+
+.dropdown-footer {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Inline truncation for workspace names that appear in headings,
+   tab buttons, and empty-state copy. Capped so they don't push other
+   header content (counts, controls) off-screen. */
+.workspace-name-truncate {
+  display: inline-block;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+  /* Match surrounding font color/weight via inherit. */
+}
+
+.subtab-workspace-name {
+  max-width: 200px;
+}
+
+.modal-narrow {
+  max-width: 480px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.field-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+/* Workspace membership picker (button → nested modal) */
+
+.workspace-picker-button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.12s;
+}
+
+.workspace-picker-button:hover {
+  border-color: var(--text-muted);
+}
+
+.workspace-picker-button-label {
+  white-space: nowrap;
+}
+
+.workspace-picker-button-chips {
+  display: flex;
+  gap: 4px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+  flex: 1;
+  min-width: 0;
+}
+
+.workspace-picker-button-chip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-size: 11px;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-picker-button-chip.muted {
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+
+.workspace-picker-button-arrow {
+  color: var(--text-muted);
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.modal-shade-nested {
+  /* Sit above the parent modal. */
+  z-index: 1010;
+}
+
+.workspace-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.workspace-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+}
+
+.workspace-picker-row:last-child {
+  border-bottom: none;
+}
+
+.workspace-picker-row:hover {
+  background: var(--bg-row-hover);
+}
+
+.workspace-picker-row-on {
+  background: rgba(88, 166, 255, 0.06);
+}
+
+.workspace-picker-row input[type=checkbox] {
+  margin: 0;
+  cursor: pointer;
+}
+
+.workspace-picker-row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+
+/* Client config snippet modal */
+
+.client-snippet {
+  margin: 0;
+  padding: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  overflow: auto;
+  max-height: 280px;
+  line-height: 1.5;
+}
+
+.client-snippet-path {
+  display: inline-block;
+  padding: 4px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+/* Worked examples for the cwd_match field */
+
+.cwd-examples p {
+  margin: 6px 0;
+}
+
+.cwd-examples-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  margin: 8px 0;
+}
+
+.cwd-examples-table th,
+.cwd-examples-table td {
+  border: 1px solid var(--border);
+  padding: 6px 8px;
+  vertical-align: top;
+  text-align: left;
+}
+
+.cwd-examples-table th {
+  background: var(--bg);
+  color: var(--text-muted);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 10px;
+}
+
+.cwd-examples-table code {
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--bg);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+/* Auto-detect chip in the workspace bar */
+
+.auto-detect-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+  max-width: 360px;
+}
+
+.auto-detect-chip:hover {
+  border-color: var(--accent);
+}
+
+.auto-detect-chip .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auto-detect-chip-empty {
+  color: var(--accent);
+  border-style: dashed;
+  background: transparent;
+}
+
+.auto-detect-icon {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* Callouts in the Connect a Client modal */
+
+.callout {
+  padding: 10px 14px;
+  border-radius: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.callout strong {
+  color: var(--text);
+}
+
+.callout-success {
+  border-left-color: var(--ok, #4ade80);
+}
+
+.callout-warn {
+  border-left-color: var(--error, #f87171);
+  background: rgba(248, 113, 113, 0.04);
+}
+
+.callout-list {
+  margin: 6px 0;
+  padding-left: 16px;
+}
+
+.callout-list li {
+  margin: 2px 0;
+}
+
+.settings-section-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* Add-existing-members picker */
+
+.add-existing-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.add-existing-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+}
+
+.add-existing-row:last-child {
+  border-bottom: none;
+}
+
+.add-existing-row:hover {
+  background: var(--bg-row-hover);
+}
+
+.add-existing-row-on {
+  background: rgba(88, 166, 255, 0.06);
+}
+
+.add-existing-row input[type=checkbox] {
+  margin: 0;
+  cursor: pointer;
+}
+
+.add-existing-transport {
+  margin-left: auto;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.add-existing-empty {
+  padding: 12px 14px;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* Scope pill — single "scoped" indicator on the server card when an
+   upstream is included in one or more workspaces. Click Edit on the
+   card to see the specific workspace memberships. */
+
+.scope-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 10px;
+  background: rgba(88, 166, 255, 0.08);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  white-space: nowrap;
+  margin-left: 4px;
+  cursor: help;
 }
 
 /* Per-upstream enable/disable toggle + reconnect controls */

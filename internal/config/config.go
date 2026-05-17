@@ -13,6 +13,22 @@ type Config struct {
 	Tools     Tools      `yaml:"tools" json:"tools"`
 	Log       Log        `yaml:"log" json:"log"`
 	Dashboard Dashboard  `yaml:"dashboard" json:"dashboard"`
+
+	// Workspaces let one daemon expose different upstream subsets per
+	// directory/client. When empty, every connection sees every
+	// upstream (the pre-workspace behavior).
+	Workspaces []Workspace `yaml:"workspaces,omitempty" json:"workspaces,omitempty"`
+}
+
+// WorkspaceByName returns the workspace with the given name, or nil if
+// none matches. The lookup is case-sensitive.
+func (c *Config) WorkspaceByName(name string) *Workspace {
+	for i := range c.Workspaces {
+		if c.Workspaces[i].Name == name {
+			return &c.Workspaces[i]
+		}
+	}
+	return nil
 }
 
 type Dashboard struct {
@@ -51,6 +67,38 @@ func (u Upstream) IsEnabled() bool {
 type Tools struct {
 	Allow []string `yaml:"allow" json:"allow"`
 	Deny  []string `yaml:"deny" json:"deny"`
+}
+
+// Workspace is a named "view" over the configured upstreams. Each
+// MCP client connection resolves to a workspace (via --workspace flag,
+// cwd match, or "default" fallback) and only sees tools from that
+// workspace's `Include` list.
+//
+// Workspaces let one Aeolus daemon expose different tool sets per
+// project: a Claude Code session in ~/code/project-a sees one set,
+// the same daemon hit with `--workspace project-b` from another
+// directory sees a different set.
+type Workspace struct {
+	Name string `yaml:"name,omitempty" json:"name"`
+
+	// Include lists the names of top-level upstreams visible in this
+	// workspace. Empty means "no upstreams" — explicit, not a wildcard.
+	Include []string `yaml:"include,omitempty" json:"include,omitempty"`
+
+	// CWDMatch is a list of directory paths or globs. When `aeolus mcp`
+	// is spawned without `--workspace`, its working directory is matched
+	// against these patterns to auto-select the workspace.
+	//
+	// Patterns:
+	//   - exact path:   /Users/me/code/foo
+	//   - ~ expansion:  ~/code/foo
+	//   - trailing /**: ~/code/foo/**   (match path itself or any descendant)
+	CWDMatch []string `yaml:"cwd_match,omitempty" json:"cwd_match,omitempty"`
+
+	// Tools layered on top of the global Tools.allow/deny. Workspace
+	// rules are evaluated *after* the global ones (intersection —
+	// either side can deny).
+	Tools Tools `yaml:"tools,omitempty" json:"tools,omitempty"`
 }
 
 type Log struct {
@@ -120,6 +168,23 @@ func (c *Config) validate() error {
 	}
 	if c.Dashboard.Enabled && c.Dashboard.Addr == "" {
 		c.Dashboard.Addr = "localhost:8765"
+	}
+	// Validate workspaces: unique names, every Include references an
+	// existing upstream.
+	wsSeen := make(map[string]bool, len(c.Workspaces))
+	for i, w := range c.Workspaces {
+		if w.Name == "" {
+			return fmt.Errorf("workspace at position %d is missing a name", i)
+		}
+		if wsSeen[w.Name] {
+			return fmt.Errorf("workspace at position %d reuses the name %q — workspace names must be unique", i, w.Name)
+		}
+		wsSeen[w.Name] = true
+		for _, inc := range w.Include {
+			if !seen[inc] {
+				return fmt.Errorf("workspace %q includes upstream %q which is not defined under upstreams:", w.Name, inc)
+			}
+		}
 	}
 	return nil
 }

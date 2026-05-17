@@ -39,6 +39,7 @@ type ToolCallObservation struct {
 	Latency   time.Duration
 	Status    string // "ok" | "error" | "transport_error"
 	Client    string // MCP client info from initialize, e.g. "claude-code 1.0.0"
+	Workspace string // resolved workspace name, empty if none
 	Arguments json.RawMessage
 	Response  json.RawMessage
 }
@@ -278,7 +279,10 @@ func (p *Proxy) routeToolsCall(ctx context.Context, msg *mcp.Message) error {
 	p.clientMu.Lock()
 	client := p.clientName
 	p.clientMu.Unlock()
-	resp := p.engine.CallTool(ctx, params.Name, params.Arguments, client)
+	// stdio Proxy doesn't carry a workspace (no header channel). All
+	// stdio sessions see every upstream — the daemon's HTTP path is
+	// where workspace resolution lives.
+	resp := p.engine.CallTool(ctx, params.Name, params.Arguments, client, "")
 	resp.ID = msg.ID
 	return p.client.Write(resp)
 }

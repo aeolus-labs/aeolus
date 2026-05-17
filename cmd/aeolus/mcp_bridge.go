@@ -31,7 +31,12 @@ func handleMCPBridge(args []string) {
 	fs := flag.NewFlagSet("mcp", flag.ExitOnError)
 	daemonURL := fs.String("daemon", "http://localhost:8765/mcp", "URL of the running aeolus daemon's MCP endpoint")
 	timeout := fs.Duration("timeout", 5*time.Minute, "per-request timeout")
+	workspace := fs.String("workspace", "", "workspace name to request from the daemon (overrides cwd auto-detect)")
 	_ = fs.Parse(args)
+
+	// Captured once at start so subprocesses launched from the MCP
+	// client (Claude, Cursor, etc.) get a stable answer.
+	cwd, _ := os.Getwd()
 
 	postClient := &http.Client{Timeout: *timeout}
 	sseClient := &http.Client{} // long-lived, no timeout
@@ -75,6 +80,12 @@ func handleMCPBridge(args []string) {
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
+		if *workspace != "" {
+			req.Header.Set("X-Aeolus-Workspace", *workspace)
+		}
+		if cwd != "" {
+			req.Header.Set("X-Aeolus-Cwd", cwd)
+		}
 
 		sessMu.Lock()
 		if sessID != "" {

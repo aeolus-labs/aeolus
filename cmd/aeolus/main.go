@@ -155,6 +155,20 @@ func defaultEventsPath() string {
 	return "events.jsonl"
 }
 
+// defaultStatePath returns the path for small persisted dashboard UI
+// preferences (tour dismissed, sidebar collapsed, etc.). Same parent
+// dir as events; entirely separate from aeolus.yaml which is user
+// config.
+func defaultStatePath() string {
+	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+		return filepath.Join(xdg, "aeolus", "dashboard_state.json")
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".local", "share", "aeolus", "dashboard_state.json")
+	}
+	return "dashboard_state.json"
+}
+
 func printUsage() {
 	fmt.Print(`Aeolus — local gateway for MCP servers.
 
@@ -284,6 +298,7 @@ func run(configPath string, dashboardPort int) error {
 	if cfg.Dashboard.Enabled {
 		dashSrv = dashboard.New(cfg.Dashboard.Addr, logger, cfg)
 		dashSrv.EnableEventPersistence(defaultEventsPath())
+		dashSrv.EnableStatePersistence(defaultStatePath())
 		observer = func(o proxy.ToolCallObservation) {
 			dashSrv.Emit(dashboard.Event{
 				Time:      o.Time,
@@ -292,6 +307,7 @@ func run(configPath string, dashboardPort int) error {
 				LatencyMs: o.Latency.Milliseconds(),
 				Status:    o.Status,
 				Client:    o.Client,
+				Workspace: o.Workspace,
 				Arguments: o.Arguments,
 				Response:  o.Response,
 			})

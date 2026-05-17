@@ -1,31 +1,26 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ToolCallEvent } from './types'
 import Settings from './Settings'
+import Dropdown from './Dropdown'
+import { useDashboardState } from './state'
 
 type View = 'servers' | 'live'
 
 const MAX_EVENTS = 500
 const TOP_STATS = 5
 
-const SIDEBAR_COLLAPSED_KEY = 'aeolus.sidebarCollapsed'
-
 export default function App() {
   const [view, setView] = useState<View>('servers')
-  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1'
-    } catch {
-      return false
-    }
-  })
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? '1' : '0')
-    } catch {
-      /* ignore */
-    }
-  }, [sidebarCollapsed])
+  // Sidebar collapsed state is persisted server-side via dashboard
+  // state so it survives browser switches. While the initial state
+  // is loading we default to "expanded" — flipping it once the value
+  // lands is a one-off; not worth a skeleton.
+  const { state: dashState, update: updateDashState } = useDashboardState()
+  const sidebarCollapsed = dashState?.sidebar_collapsed ?? false
+  function setSidebarCollapsed(next: boolean) {
+    updateDashState({ sidebar_collapsed: next })
+  }
 
   const [events, setEvents] = useState<ToolCallEvent[]>([])
   const [connected, setConnected] = useState(false)
@@ -90,7 +85,12 @@ export default function App() {
             <SidebarItem active={view === 'servers'} onClick={() => setView('servers')} label="Servers">
               <ServersIcon />
             </SidebarItem>
-            <SidebarItem active={view === 'live'} onClick={() => setView('live')} label="Live">
+            <SidebarItem
+              active={view === 'live'}
+              onClick={() => setView('live')}
+              label="Live"
+              tourId="live-tab"
+            >
               <LiveIcon />
             </SidebarItem>
           </div>
@@ -102,6 +102,28 @@ export default function App() {
           >
             <ChevronIcon flipped={sidebarCollapsed} />
             {!sidebarCollapsed && <span className="sidebar-label">Collapse</span>}
+          </button>
+          <div className="sidebar-divider" />
+          <button
+            className="sidebar-toggle sidebar-help"
+            onClick={() => {
+              // Tour spotlights elements on the Servers page, so write
+              // a "pending open" flag and switch view. TourController
+              // reads the flag on mount (handles the cross-tab case)
+              // and also listens for the event (handles same-tab clicks
+              // when Settings is already mounted). Belt-and-suspenders
+              // is necessary because useEffect attaches the event
+              // listener *after* render, and a setTimeout-driven
+              // dispatch can fire too early.
+              sessionStorage.setItem('aeolus.tourPending', '1')
+              window.dispatchEvent(new Event('aeolus:open-tour'))
+              setView('servers')
+            }}
+            title="Show the guided tour"
+            aria-label="Show the guided tour"
+          >
+            <span className="sidebar-icon"><HelpIcon /></span>
+            {!sidebarCollapsed && <span className="sidebar-label">Help</span>}
           </button>
         </nav>
 
@@ -133,11 +155,13 @@ function SidebarItem({
   active,
   onClick,
   label,
+  tourId,
   children,
 }: {
   active: boolean
   onClick: () => void
   label: string
+  tourId?: string
   children: React.ReactNode
 }) {
   return (
@@ -145,6 +169,7 @@ function SidebarItem({
       className={`sidebar-item ${active ? 'sidebar-item-active' : ''}`}
       onClick={onClick}
       title={label}
+      data-tour={tourId}
     >
       <span className="sidebar-icon">{children}</span>
       <span className="sidebar-label">{label}</span>
@@ -185,6 +210,25 @@ function ChevronIcon({ flipped }: { flipped: boolean }) {
       style={{ transform: flipped ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}
     >
       <polyline points="15 18 9 12 15 6" />
+    </svg>
+  )
+}
+
+function HelpIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="18"
+      height="18"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="12" cy="12" r="10" />
+      <path d="M9.5 9a2.5 2.5 0 1 1 4.5 1.5c-.83 .67 -2 1.5 -2 3" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
     </svg>
   )
 }
@@ -280,6 +324,15 @@ function FilterBar(props: {
   upstreamFilter: string
   onUpstreamFilter: (s: string) => void
 }) {
+  const upstreamOptions = [
+    { value: '', label: 'All servers' },
+    ...props.upstreams.map((u) => ({ value: u, label: u })),
+  ]
+  const statusOptions = [
+    { value: '', label: 'All status' },
+    { value: 'ok', label: 'ok only' },
+    { value: 'error', label: 'errors only' },
+  ]
   return (
     <div className="filter-bar">
       <input
@@ -289,26 +342,19 @@ function FilterBar(props: {
         value={props.search}
         onChange={(e) => props.onSearch(e.target.value)}
       />
-      <select
-        className="select"
+      <Dropdown
         value={props.upstreamFilter}
-        onChange={(e) => props.onUpstreamFilter(e.target.value)}
+        options={upstreamOptions}
+        onChange={props.onUpstreamFilter}
+        width={180}
         title="Filter by server (mirrors the server card selection)"
-      >
-        <option value="">All servers</option>
-        {props.upstreams.map((u) => (
-          <option key={u} value={u}>{u}</option>
-        ))}
-      </select>
-      <select
-        className="select"
+      />
+      <Dropdown
         value={props.status}
-        onChange={(e) => props.onStatus(e.target.value as '' | 'ok' | 'error')}
-      >
-        <option value="">All status</option>
-        <option value="ok">ok only</option>
-        <option value="error">errors only</option>
-      </select>
+        options={statusOptions}
+        onChange={(v) => props.onStatus(v as '' | 'ok' | 'error')}
+        width={140}
+      />
     </div>
   )
 }

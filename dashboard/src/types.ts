@@ -7,6 +7,7 @@ export type ToolCallEvent = {
   latency_ms: number
   status: ToolCallStatus
   client?: string
+  workspace?: string
   arguments?: unknown
   response?: unknown
 }
@@ -44,11 +45,19 @@ export type Log = {
   format: string
 }
 
+export type Workspace = {
+  name: string
+  include?: string[]
+  cwd_match?: string[]
+  tools?: Tools
+}
+
 export type AeolusConfig = {
   upstreams: Upstream[]
   tools: Tools
   log: Log
   dashboard: Dashboard
+  workspaces?: Workspace[]
 }
 
 export type CatalogEntry = {
