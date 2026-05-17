@@ -96,6 +96,13 @@ func main() {
 		return
 	}
 
+	// Keep the version reported in MCP initialize responses + the
+	// dashboard's /api/version endpoint in sync with the binary's
+	// --version output. All default to "dev" for local builds;
+	// goreleaser injects the real version at release.
+	proxy.SetVersion(version)
+	dashboard.SetVersion(version)
+
 	resolved, err := resolveConfigPath(*configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "aeolus:", err)
@@ -287,11 +294,8 @@ func run(configPath string, dashboardPort int) error {
 		os.Exit(1)
 	}()
 
-	upstreams, err := startUpstreams(ctx, cfg.Upstreams, logger)
-	if err != nil {
-		return err
-	}
-
+	// Construct the dashboard server first (no Run yet) so we can hand
+	// it to startUpstreams for stderr capture. Run() happens below.
 	var dashSrv *dashboard.Server
 	var observer proxy.Observer
 	var wg sync.WaitGroup
@@ -299,6 +303,14 @@ func run(configPath string, dashboardPort int) error {
 		dashSrv = dashboard.New(cfg.Dashboard.Addr, logger, cfg)
 		dashSrv.EnableEventPersistence(defaultEventsPath())
 		dashSrv.EnableStatePersistence(defaultStatePath())
+	}
+
+	upstreams, err := startUpstreams(ctx, cfg.Upstreams, logger, dashSrv)
+	if err != nil {
+		return err
+	}
+
+	if dashSrv != nil {
 		observer = func(o proxy.ToolCallObservation) {
 			dashSrv.Emit(dashboard.Event{
 				Time:      o.Time,
@@ -335,7 +347,7 @@ func run(configPath string, dashboardPort int) error {
 	}
 
 	reloadFn := func(reloadCtx context.Context, newCfg *config.Config) error {
-		newUpstreams, err := startUpstreams(reloadCtx, newCfg.Upstreams, logger)
+		newUpstreams, err := startUpstreams(reloadCtx, newCfg.Upstreams, logger, dashSrv)
 		if err != nil {
 			return err
 		}
@@ -378,7 +390,7 @@ func run(configPath string, dashboardPort int) error {
 					return nil, err
 				}
 				if r := srv.Stderr(); r != nil {
-					go forwardStderr(found.Name, r)
+					go forwardStderr(found.Name, r, dashSrv)
 				}
 				return srv, nil
 			}
@@ -430,7 +442,7 @@ func run(configPath string, dashboardPort int) error {
 // Caller owns the lifetime; pair with Shutdown on each or call Proxy.Reload
 // to hand them off. Upstreams whose IsEnabled() is false are skipped — they
 // remain visible in the config (and dashboard) but never get spawned.
-func startUpstreams(ctx context.Context, list []config.Upstream, logger *slog.Logger) ([]upstream.Server, error) {
+func startUpstreams(ctx context.Context, list []config.Upstream, logger *slog.Logger, dashSrv *dashboard.Server) ([]upstream.Server, error) {
 	out := make([]upstream.Server, 0, len(list))
 	for _, u := range list {
 		if !u.IsEnabled() {
@@ -445,16 +457,18 @@ func startUpstreams(ctx context.Context, list []config.Upstream, logger *slog.Lo
 			return nil, err
 		}
 		if r := srv.Stderr(); r != nil {
-			go forwardStderr(u.Name, r)
+			go forwardStderr(u.Name, r, dashSrv)
 		}
 		out = append(out, srv)
 	}
 	return out, nil
 }
 
-// forwardStderr reads `r` line by line and prints each line prefixed with
-// "[<name>] " to os.Stderr. This keeps multi-line upstream errors readable.
-func forwardStderr(name string, r io.Reader) {
+// forwardStderr reads `r` line by line, prints each line prefixed with
+// "[<name>] " to os.Stderr, and tees a copy into the dashboard's
+// per-upstream stderr ring so the broken-upstream UI can surface them.
+// dashSrv may be nil for builds without the dashboard wired up.
+func forwardStderr(name string, r io.Reader, dashSrv *dashboard.Server) {
 	if r == nil {
 		return
 	}
@@ -462,7 +476,11 @@ func forwardStderr(name string, r io.Reader) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
-		fmt.Fprintln(os.Stderr, prefix+scanner.Text())
+		line := scanner.Text()
+		fmt.Fprintln(os.Stderr, prefix+line)
+		if dashSrv != nil {
+			dashSrv.AppendUpstreamStderr(name, line)
+		}
 	}
 }
 

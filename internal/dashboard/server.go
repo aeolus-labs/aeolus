@@ -55,8 +55,9 @@ type Server struct {
 
 	engine McpEngine // nil until SetEngine is called
 
-	events *eventStore // nil = persistence disabled (in-memory only)
-	state  *stateStore // nil = dashboard state persistence disabled
+	events *eventStore  // nil = persistence disabled (in-memory only)
+	state  *stateStore  // nil = dashboard state persistence disabled
+	stderr *stderrStore // ring of recent upstream stderr lines for diagnostics
 
 	mcpMu       sync.Mutex
 	mcpSessions map[string]*mcpSession
@@ -137,6 +138,7 @@ func New(addr string, log *slog.Logger, cfg *config.Config) *Server {
 		catalog:            nil, // populated by background registry fetch
 		catalogSubscribers: make(map[chan CatalogBatch]struct{}),
 		configChangeSubs:   make(map[chan struct{}]struct{}),
+		stderr:             newStderrStore(),
 		mcpSessions:        make(map[string]*mcpSession),
 		maxRecent:          256,
 		subBuffer:          32,
@@ -270,6 +272,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/upstreams/", s.handleUpstream)
 	mux.HandleFunc("/api/dashboard/state", s.handleDashboardState)
 	mux.HandleFunc("/api/config/stream", s.handleConfigStream)
+	mux.HandleFunc("/api/version", s.handleVersion)
 	mux.HandleFunc("/mcp", s.handleMCP)
 	if assets != nil {
 		mux.Handle("/", http.FileServer(http.FS(assets)))
@@ -563,6 +566,21 @@ func (s *Server) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 	// aren't referenced by the new one (upstream removed, env var dropped,
 	// or value swapped to a different keychain ref / plaintext).
 	s.cleanupOrphanedSecrets(currentCfg, &newCfg)
+
+	// Drop stderr buffers for upstreams that were just removed entirely,
+	// so re-adding a name later doesn't show stale lines from a previous
+	// incarnation.
+	if currentCfg != nil {
+		nextNames := make(map[string]struct{}, len(newCfg.Upstreams))
+		for _, u := range newCfg.Upstreams {
+			nextNames[u.Name] = struct{}{}
+		}
+		for _, u := range currentCfg.Upstreams {
+			if _, kept := nextNames[u.Name]; !kept {
+				s.stderr.Forget(u.Name)
+			}
+		}
+	}
 
 	yamlBytes, err := yaml.Marshal(&newCfg)
 	if err != nil {
@@ -961,6 +979,14 @@ func (s *Server) handleCatalogStream(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// handleVersion returns the running daemon's version so the React UI
+// can show it next to the brand, instead of hardcoding a string that
+// rots with every release.
+func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"version": daemonVersion})
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {

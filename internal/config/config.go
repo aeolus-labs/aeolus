@@ -95,6 +95,17 @@ type Workspace struct {
 	//   - trailing /**: ~/code/foo/**   (match path itself or any descendant)
 	CWDMatch []string `yaml:"cwd_match,omitempty" json:"cwd_match,omitempty"`
 
+	// ClientMatch is a list of substrings (case-insensitive) matched
+	// against the MCP client's identity string ("Claude Code 1.2.3",
+	// "cursor 0.4", "Visual Studio Code", "Zed"). When non-empty, the
+	// workspace only auto-selects for clients whose identity contains
+	// one of these substrings.
+	//
+	// Combines with CWDMatch via AND: if both are set, *both* must
+	// match. If only one is set, only that one must match. Empty means
+	// "don't constrain on client identity".
+	ClientMatch []string `yaml:"client_match,omitempty" json:"client_match,omitempty"`
+
 	// Tools layered on top of the global Tools.allow/deny. Workspace
 	// rules are evaluated *after* the global ones (intersection —
 	// either side can deny).

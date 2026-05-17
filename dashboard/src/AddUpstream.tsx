@@ -23,7 +23,7 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
   const [step, setStep] = useState<'pick' | 'form'>(
     isEdit || prefill ? 'form' : 'pick'
   )
-  const [modalTab, setModalTab] = useState<'setup' | 'tools'>('setup')
+  const [modalTab, setModalTab] = useState<'setup' | 'tools' | 'description'>('setup')
 
   const [name, setName] = useState(editing?.name ?? '')
   const [transport, setTransport] = useState<'stdio' | 'http'>(
@@ -373,6 +373,13 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
               >
                 Tools{probedTools ? ` (${selectedTools.size}/${probedTools.length})` : ''}
               </button>
+              <button
+                className={`tab ${modalTab === 'description' ? 'tab-active' : ''}`}
+                onClick={() => setModalTab('description')}
+                title="Server description + a YAML snippet you can paste manually"
+              >
+                Description
+              </button>
             </div>
 
             {modalTab === 'setup' && (
@@ -431,6 +438,20 @@ export default function AddUpstream({ config, catalog, editing, prefill, onClose
                 }}
                 onSelectAll={() => setSelectedTools(new Set(probedTools.map((t) => t.name)))}
                 onSelectNone={() => setSelectedTools(new Set())}
+              />
+            )}
+
+            {modalTab === 'description' && (
+              <DescriptionStep
+                name={name}
+                transport={transport}
+                command={command}
+                args={args}
+                envEntries={envEntries}
+                url={url}
+                headerEntries={headerEntries}
+                prefill={prefill ?? undefined}
+                editing={editing ?? undefined}
               />
             )}
 
@@ -751,6 +772,153 @@ function EnvEditor({
       </button>
     </div>
   )
+}
+
+// DescriptionStep renders the Description tab inside the AddUpstream
+// modal: a short blurb pulled from the catalog entry (if any) plus a
+// YAML snippet the user can copy and paste under `upstreams:` in their
+// aeolus.yaml — useful for hand-editing or sharing a config with
+// teammates without going through the dashboard.
+function DescriptionStep(props: {
+  name: string
+  transport: 'stdio' | 'http'
+  command: string
+  args: string
+  envEntries: EnvRow[]
+  url: string
+  headerEntries: EnvRow[]
+  prefill?: CatalogEntry
+  editing?: Upstream
+}) {
+  const [copied, setCopied] = useState(false)
+
+  // Build the YAML snippet from current form state. We deliberately
+  // emit `keychain:<name>` placeholders rather than real secret
+  // values so this is safe to copy/share. Plain (insecure) values
+  // round-trip as-is.
+  const snippet = buildUpstreamYAML({
+    name: props.name,
+    transport: props.transport,
+    command: props.command,
+    args: argsLines(props.args),
+    env: props.envEntries,
+    url: props.url,
+    headers: props.headerEntries,
+  })
+
+  const blurb = props.prefill?.description ?? ''
+  const repo = props.prefill?.repository ?? ''
+  const site = props.prefill?.website ?? ''
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(snippet)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return (
+    <div className="modal-body">
+      {(blurb || repo || site) && (
+        <Field label="About this server">
+          {blurb && <p className="description-blurb">{blurb}</p>}
+          {(repo || site) && (
+            <p className="description-links">
+              {repo && (
+                <a href={repo} target="_blank" rel="noreferrer noopener">
+                  Repository
+                </a>
+              )}
+              {repo && site && <span className="muted"> · </span>}
+              {site && (
+                <a href={site} target="_blank" rel="noreferrer noopener">
+                  Website
+                </a>
+              )}
+            </p>
+          )}
+        </Field>
+      )}
+      {props.editing && !blurb && !repo && !site && (
+        <p className="muted description-blurb">
+          No catalog metadata for this upstream — it was added as a
+          custom entry.
+        </p>
+      )}
+      <Field
+        label="YAML snippet"
+        hint="Paste under `upstreams:` in ~/.config/aeolus/aeolus.yaml. Keychain values render as placeholders so this is safe to share."
+      >
+        <pre className="description-yaml">{snippet}</pre>
+        <button type="button" className="btn-secondary" onClick={copy}>
+          {copied ? '✓ Copied' : 'Copy snippet'}
+        </button>
+      </Field>
+    </div>
+  )
+}
+
+type UpstreamYAMLInput = {
+  name: string
+  transport: 'stdio' | 'http'
+  command: string
+  args: string[]
+  env: EnvRow[]
+  url: string
+  headers: EnvRow[]
+}
+
+// buildUpstreamYAML emits the small YAML block that represents one
+// upstream. We avoid pulling in a YAML library — output is simple
+// enough to handcraft and we control every field that lands here.
+function buildUpstreamYAML(u: UpstreamYAMLInput): string {
+  const lines: string[] = []
+  lines.push(`- name: ${yamlString(u.name || '<set-name>')}`)
+  lines.push(`  transport: ${u.transport}`)
+  if (u.transport === 'stdio') {
+    lines.push(`  command: ${yamlString(u.command || '<command>')}`)
+    if (u.args.length > 0) {
+      lines.push(`  args:`)
+      for (const a of u.args) lines.push(`    - ${yamlString(a)}`)
+    }
+    if (u.env.length > 0) {
+      lines.push(`  env:`)
+      for (const e of u.env) {
+        if (!e.key) continue
+        const v = e.secure && !e.value.startsWith('keychain:')
+          ? `keychain:${u.name || '<name>'}.${e.key}`
+          : (e.value || '')
+        lines.push(`    - ${yamlString(`${e.key}=${v}`)}`)
+      }
+    }
+  } else {
+    lines.push(`  url: ${yamlString(u.url || '<url>')}`)
+    if (u.headers.length > 0) {
+      lines.push(`  headers:`)
+      for (const h of u.headers) {
+        if (!h.key) continue
+        const v = h.secure && !h.value.startsWith('keychain:')
+          ? `keychain:${u.name || '<name>'}.headers.${h.key}`
+          : (h.value || '')
+        lines.push(`    ${yamlString(h.key)}: ${yamlString(v)}`)
+      }
+    }
+  }
+  return lines.join('\n')
+}
+
+// yamlString emits a value double-quoted if it contains any character
+// that's risky as a bare YAML scalar (whitespace inside, colons,
+// quotes, special chars). Otherwise it's emitted bare for readability.
+function yamlString(s: string): string {
+  if (s === '') return '""'
+  if (/^[A-Za-z0-9_\-./~@]+$/.test(s)) return s
+  // Escape backslashes and double quotes, then wrap.
+  const escaped = s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  return `"${escaped}"`
 }
 
 function ToolPicker({

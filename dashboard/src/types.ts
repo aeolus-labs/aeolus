@@ -49,6 +49,7 @@ export type Workspace = {
   name: string
   include?: string[]
   cwd_match?: string[]
+  client_match?: string[]
   tools?: Tools
 }
 

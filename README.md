@@ -1,10 +1,27 @@
-# Aeolus
+<p align="center">
+  <img src="./dashboard/public/icon.svg" alt="Aeolus" width="120" height="120" />
+</p>
 
-A local daemon that gateways every MCP server you use through one dashboard.
+<h1 align="center">Aeolus</h1>
+
+<p align="center">
+  <strong>A local daemon that gateways every MCP server you use through one dashboard.</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/aeolus-labs/aeolus/releases/latest"><img src="https://img.shields.io/github/v/release/aeolus-labs/aeolus?color=58a6ff&label=release" alt="Latest release"/></a>
+  <a href="https://github.com/aeolus-labs/aeolus/blob/main/LICENSE"><img src="https://img.shields.io/github/license/aeolus-labs/aeolus?color=58a6ff" alt="MIT license"/></a>
+  <a href="https://github.com/aeolus-labs/aeolus/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/aeolus-labs/aeolus/release.yml?branch=main&label=build" alt="Build status"/></a>
+  <a href="https://github.com/aeolus-labs/aeolus/stargazers"><img src="https://img.shields.io/github/stars/aeolus-labs/aeolus?color=58a6ff" alt="GitHub stars"/></a>
+</p>
+
+<p align="center">
+  <img src="./.github/assets/dashboard.png" alt="Aeolus dashboard" width="860"/>
+</p>
 
 Aeolus runs as a long-lived background service on your laptop. It exposes one MCP endpoint (Streamable HTTP + a stdio bridge) that aggregates every MCP server you've configured — filesystem, github, slack, postgres, hosted servers, anything that speaks MCP. Any client — Claude Code, Cursor, GitHub Copilot, Zed, Continue, custom agents — connects to that one endpoint instead of wiring up each MCP server individually. **Workspaces** let one daemon expose different tool sets per project, auto-detected by directory.
 
-> Status: **v0.5.x — alpha.** Daemon architecture, single binary, macOS service install today (Linux/Windows binaries run fine in the foreground).
+> Status: **v1.0.0 — first public release.** Stable YAML config and CLI; new features ship as v1.x. Single binary; service install on macOS (launchd) and Linux (systemd user unit). Windows binaries run fine in the foreground.
 
 ## Why
 
@@ -12,7 +29,7 @@ Plain MCP gives you tools but leaves four gaps:
 
 1. **Tool bloat.** Loading every tool from every connected MCP server burns context tokens and degrades model performance.
 2. **No audit trail.** When an agent calls a tool, nobody logs who, what, when, with what arguments.
-3. **No policy.** Any process on your machine can configure any MCP server — including ones that touch production.
+3. **No central policy.** Every client maintains its own allow/deny list, so the same "don't expose write-to-prod tools" rule has to be repeated in each one — and stays out of sync the moment you forget.
 4. **No scoping.** Pointing Claude / Cursor / Zed at the right tools per project means hand-editing each one's config in each repo.
 
 Aeolus closes those gaps without changing how MCP servers or clients work.
@@ -49,30 +66,30 @@ Aeolus handles:
 ## Install
 
 ```bash
-# Build from source (until binary releases are published)
-git clone https://github.com/aeolus-labs/aeolus.git
-cd aeolus
-make build
-sudo mv ./aeolus /usr/local/bin/
+brew install aeolus-labs/tap/aeolus
 ```
 
-Requires Go 1.22+ and Node 18+ to build. Future releases will be downloadable binaries (and eventually `brew install aeolus-labs/tap/aeolus`).
+Or build from source (requires Go 1.22+ and Node 18+):
+
+```bash
+git clone https://github.com/aeolus-labs/aeolus.git
+cd aeolus
+make build && sudo mv ./aeolus /usr/local/bin/
+```
 
 ## First run
 
 ```bash
-# Generate a starter config at ~/.config/aeolus/aeolus.yaml
-aeolus init
-
-# Install the launchd service (macOS)
+# Install the OS service and start it (macOS launchd / Linux systemd
+# user unit). Also writes a starter ~/.config/aeolus/aeolus.yaml if
+# one doesn't already exist.
 aeolus service install
-aeolus service start
 
 # Open the dashboard
 aeolus open
 ```
 
-The dashboard pops up at `http://localhost:8765`. Use it to add your first MCP server (Servers tab → Catalog or `+ Add upstream`). Changes apply immediately — no daemon restart needed.
+The dashboard lives at `http://localhost:8765`. Use it to add your first MCP server (Servers tab → Catalog or `+ Add upstream`). Changes apply immediately — no daemon restart needed.
 
 To check status:
 
@@ -85,13 +102,29 @@ To remove:
 
 ```bash
 aeolus service uninstall
+brew uninstall aeolus    # if installed via brew
 ```
 
-If you'd rather run the daemon in the foreground (no launchd):
+On Linux the systemd unit runs in user scope (`systemctl --user`), so it
+starts when you log in. To keep it running across logouts:
+
+```bash
+sudo loginctl enable-linger $USER
+```
+
+If you'd rather run the daemon in the foreground (no service):
 
 ```bash
 aeolus  # reads ~/.config/aeolus/aeolus.yaml by default
 ```
+
+## Pin the dashboard to your Dock (optional)
+
+The dashboard ships as an installable Progressive Web App, so it gets its own Dock icon and Cmd-Tab entry instead of being just another browser tab.
+
+- **Chrome / Edge / Brave / Arc** (macOS, Windows, Linux): click the install icon in the URL bar → "Install Aeolus".
+- **Safari 17+** (macOS Sonoma and later): with the dashboard open, `File → Add to Dock…`.
+- **Firefox**: no install path — bookmark `http://localhost:8765` instead.
 
 ## Connect your MCP client
 
@@ -262,7 +295,10 @@ A **workspace** is a named subset of your upstreams. When an MCP client connects
 Resolution priority:
 
 1. Explicit `--workspace <name>` arg on `aeolus mcp`.
-2. The bridge's current working directory matches a workspace's `cwd_match`.
+2. Auto-match: the bridge's current working directory and the MCP
+   client's identity are matched against each workspace's `cwd_match`
+   and `client_match` rules. If a workspace defines both, both must
+   match (AND). The most specific matching workspace wins.
 3. A workspace literally named `default` (if defined) — used as the global fallback.
 4. Otherwise: only upstreams **not** in any workspace are exposed. (Scoped servers are exclusive to their scope.)
 
@@ -298,6 +334,28 @@ With this config:
 
 Longest match wins so a more specific workspace outranks a broader one.
 
+### Filter by client too
+
+`client_match` lets a workspace only auto-select for specific MCP
+clients. It's a list of case-insensitive substrings matched against the
+client's identity string (e.g. `"Claude Code 1.2.3"`, `"cursor 0.4"`,
+`"Visual Studio Code 1.95"`, `"Zed 0.1"`):
+
+```yaml
+workspaces:
+  - name: claude-only-prod
+    include: [acme-db]
+    client_match: ["claude"]   # matches "Claude Code 1.2", "Claude Desktop"
+
+  - name: cursor-research
+    include: [filesystem, research-arxiv]
+    cwd_match: ["~/research/**"]
+    client_match: ["cursor"]   # AND with cwd_match — both must match
+```
+
+This is useful for "give Claude Code access to the prod DB but never
+Cursor" or "this folder only opens its tools to a specific client".
+
 ### Per-project explicit
 
 If your client doesn't run from a stable cwd (e.g., Claude Desktop's `.app` launched from the dock), use an explicit `--workspace`:
@@ -314,9 +372,11 @@ The dashboard's "Connect a client" button generates this snippet for you.
 Visit `http://localhost:8765` (or run `aeolus open`).
 
 - **Guided tour** — auto-opens on first visit. Re-open anytime via the `Help` button at the bottom of the left sidebar.
-- **Servers tab**: every configured upstream with per-card Enable/Disable, Reconnect, and a Setup / Tools view. Workspace dropdown at the top to switch between scoped views; the active workspace shows its cwd-match patterns inline. `Connect a client →` button generates the exact JSON snippet for Claude / Cursor / VS Code Copilot / Zed. Broken upstreams show a red `broken` pill and the engine's last error inline.
+- **Servers tab**: every configured upstream with per-card Enable/Disable, Reconnect, and Setup / Tools / Description sub-tabs. The Description tab carries the catalog blurb plus a copy-pasteable YAML snippet (secrets render as `keychain:` placeholders so the snippet is safe to share). Workspace dropdown at the top to switch between scoped views; the active workspace shows its cwd-match patterns inline. `Connect a client →` generates the exact JSON snippet for Claude / Cursor / VS Code Copilot / Zed.
+- **Broken upstreams** get a red `broken` pill, an actionable error title (e.g., *"The URL is invalid — needs http:// or https:// prefix"* instead of the raw Go error), and the **last lines of the server's stderr** inline — so "process exited" comes with the actual reason (missing env var, runtime panic, etc.) right next to it.
 - **Catalog tab**: browse ~2,600 MCP servers from the official MCP Registry. Filter by transport / auth, infinite scroll, one-click Add.
-- **Live tab**: streaming tool calls — time, upstream, tool, client, latency, status. Click a row to expand syntax-highlighted JSON arguments and response, with a Copy button on each.
+- **Live tab**: streaming tool calls — time, upstream, tool, client, latency, status. Click a row to expand syntax-highlighted JSON arguments and response, with a Copy button on each. Calls are tagged by workspace so you can see per-project usage.
+- **Auto-refresh on hand-edits**: a long-lived SSE channel notifies the dashboard whenever the file watcher reloads `aeolus.yaml`, so changes you make in a text editor show up without pressing reload.
 
 ## CLI reference
 
@@ -325,13 +385,20 @@ aeolus                                 run as a daemon (foreground)
 aeolus --config <path>                 daemon, custom config path
 aeolus --dashboard-port <n>            daemon, override dashboard port
 
-aeolus service install [--force]       write the launchd plist (macOS)
-aeolus service start                   load + start via launchd
-aeolus service stop                    bootout
+aeolus service install [--force]       write the OS service unit and
+[--no-start]                           start the daemon. Also creates a
+                                       starter ~/.config/aeolus/aeolus.yaml
+                                       on first run.
+                                       (macOS: launchd plist;
+                                        Linux: systemd user unit)
+aeolus service start                   start the daemon under your user
+aeolus service stop                    stop the daemon
 aeolus service status                  running / loaded, not running / not loaded
-aeolus service restart                 in-place restart via kickstart
-aeolus service uninstall               bootout + remove plist
-aeolus service logs [-f] [-n N]        tail ~/Library/Logs/aeolus/aeolus.log
+aeolus service restart                 in-place restart
+aeolus service uninstall               stop + remove the service unit
+aeolus service logs [-f] [-n N]        tail daemon stderr
+                                       (macOS: ~/Library/Logs/aeolus/;
+                                        Linux: journalctl --user)
 
 aeolus mcp [--workspace <name>] [--daemon <url>] [--timeout <d>]
                                        stdio bridge to a running daemon
@@ -370,15 +437,9 @@ aeolus/
 | `~/.local/share/aeolus/dashboard_state.json` | daemon | UI preferences (tour dismissed, sidebar collapsed). Survives browser switches. |
 | `~/Library/LaunchAgents/com.aeolus-labs.aeolus.plist` (macOS) | `aeolus service` | launchd unit. PATH inherited from your interactive shell at install time. |
 | `~/Library/Logs/aeolus/aeolus.log` (macOS) | launchd | Daemon stderr. |
+| `~/.config/systemd/user/aeolus.service` (Linux) | `aeolus service` | systemd user unit. PATH inherited from your shell. Logs go to the systemd journal (`journalctl --user -u aeolus`). |
 
 OS keychain: any value in `env:` or `headers:` that starts with `keychain:` is resolved at spawn time. Secrets never live in YAML.
-
-## What's next
-
-- macOS `.app` bundle so a Dock icon launches the dashboard.
-- Linux systemd / Windows service equivalents to `aeolus service`.
-- Per-client filtering (different tool sets for Copilot vs. Claude even when running in the same dir).
-- Per-tool toggles in the dashboard (today: workspace-level scoping + global allow/deny patterns).
 
 ## License
 

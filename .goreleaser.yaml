@@ -71,20 +71,52 @@ release:
     ---
     Built from commit `{{.ShortCommit}}`.
 
-# Homebrew formula is generated into a separate aeolus-labs/homebrew-tap
-# repo. Stays commented out until that repo + a HOMEBREW_TAP_GITHUB_TOKEN
-# secret exist. Uncomment when ready.
+# Homebrew Cask is generated into a separate aeolus-labs/homebrew-tap
+# repo (the `homebrew-` prefix is what makes GitHub recognize it as a
+# tap). The release job needs HOMEBREW_TAP_GITHUB_TOKEN set in this
+# repository's secrets — a fine-grained PAT with contents:write on the
+# tap repo. If the secret isn't set or the tap repo doesn't exist, the
+# binaries still publish to the release; only the cask update fails.
 #
-# brews:
-#   - name: aeolus
-#     repository:
-#       owner: aeolus-labs
-#       name: homebrew-tap
-#       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-#     homepage: "https://github.com/aeolus-labs/aeolus"
-#     description: "Local gateway for Model Context Protocol (MCP) servers"
-#     license: "MIT"
-#     install: |
-#       bin.install "aeolus"
-#     test: |
-#       system "#{bin}/aeolus", "--version"
+# Why a Cask instead of a Formula? GoReleaser v2.10 deprecated the
+# Formula generator (`brews:`) because Formulas are meant to build from
+# source. We're shipping pre-compiled binaries, which Casks model
+# honestly. End users still install with `brew install aeolus-labs/tap/aeolus`.
+homebrew_casks:
+  - name: aeolus
+    repository:
+      owner: aeolus-labs
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://github.com/aeolus-labs/aeolus"
+    description: "Local gateway for Model Context Protocol (MCP) servers"
+    binaries:
+      - aeolus
+    # The binary isn't notarized yet, so strip the Gatekeeper quarantine
+    # attribute on install. Without this, macOS refuses to execute the
+    # binary on first run ("cannot be opened because the developer cannot
+    # be verified"). Revisit when we set up Apple Developer ID signing.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/aeolus"]
+          end
+    caveats: |
+      Aeolus is installed. To finish setup:
+
+        aeolus service install   # installs the OS service + starts the daemon
+        aeolus open              # opens the dashboard at http://localhost:8765
+
+      On Linux, also enable user lingering so the daemon keeps running
+      when you're logged out:
+
+        sudo loginctl enable-linger $USER
+
+      Configure MCP servers via the dashboard, or edit:
+
+        ~/.config/aeolus/aeolus.yaml
+
+      Then point Claude / Cursor / Zed / Copilot at Aeolus — the
+      dashboard's "Connect a client" button generates the exact snippet
+      for each client.

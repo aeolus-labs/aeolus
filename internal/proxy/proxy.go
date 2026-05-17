@@ -25,10 +25,23 @@ import (
 	"github.com/aeolus-labs/aeolus/internal/upstream"
 )
 
-const (
-	proxyName    = "aeolus"
-	proxyVersion = "0.4.0-dev"
-)
+const proxyName = "aeolus"
+
+// proxyVersion is what Aeolus reports in MCP initialize responses
+// (both as server-info to connecting clients and as client-info to
+// upstream servers). Defaults to "dev" for plain `go build`; main
+// calls SetVersion at startup so release builds report the real
+// version injected via goreleaser's -ldflags.
+var proxyVersion = "dev"
+
+// SetVersion overrides the version string reported in MCP initialize
+// responses. Called once from main at startup to keep the proxy's
+// reported version in sync with the binary's --version output.
+func SetVersion(v string) {
+	if v != "" {
+		proxyVersion = v
+	}
+}
 
 // ToolCallObservation is emitted after each tools/call response (success
 // or error) so observers can record metrics or stream events.

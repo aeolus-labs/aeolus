@@ -36,6 +36,19 @@ export default function App() {
   const [search, setSearch] = useState('')
   const [upstreamFilter, setUpstreamFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState<'' | 'ok' | 'error'>('')
+  const [version, setVersion] = useState<string | null>(null)
+
+  // Fetch the daemon version once on mount. /api/version returns the
+  // string main.go injected into the dashboard package (release builds:
+  // the real tag; local builds: "dev"). One-shot; never re-fetches.
+  useEffect(() => {
+    fetch('/api/version')
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((j: { version: string }) => setVersion(j.version))
+      .catch(() => {
+        /* leave version null; the span just won't render */
+      })
+  }, [])
 
   useEffect(() => {
     const es = new EventSource('/api/events')
@@ -77,7 +90,7 @@ export default function App() {
       <header className="header">
         <div className="brand">
           <span className="logo">Aeolus</span>
-          <span className="version">v0.4.0-dev</span>
+          {version && <span className="version">v{version}</span>}
           <span className={`conn conn-${connected ? 'on' : 'off'}`}>
             {connected ? 'live' : 'disconnected'}
           </span>

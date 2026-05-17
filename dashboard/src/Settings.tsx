@@ -6,6 +6,7 @@ import { applyCatalogFilters, type CatalogFilters } from './catalogFilters'
 import Dropdown, { DropdownAction } from './Dropdown'
 import Tour, { type TourStep } from './Tour'
 import { useDashboardState } from './state'
+import { useConfirm } from './ConfirmDialog'
 import { loadKnownBad } from './knownBad'
 
 const CATALOG_PAGE_SIZE = 60
@@ -46,6 +47,7 @@ export default function Settings() {
   // engine couldn't initialize (or whose tools failed to refresh).
   // Polled every 5s and refreshed after each mutation.
   const [failures, setFailures] = useState<Record<string, string>>({})
+  const [confirm, confirmDialog] = useConfirm()
 
   useEffect(() => {
     api.config().then(setConfig).catch((err) => setError(err.message))
@@ -156,7 +158,37 @@ export default function Settings() {
 
   async function removeUpstream(u: Upstream) {
     if (!config) return
-    if (!confirm(`Remove upstream "${u.name}"? Its allow rules will also be cleared.`)) return
+    // Names of any workspaces that have this upstream in their
+    // include list — surfaced in the confirm dialog so the user
+    // knows the upstream will silently leave those scopes too.
+    const memberOf = (config.workspaces ?? [])
+      .filter((w) => (w.include ?? []).includes(u.name))
+      .map((w) => w.name)
+    const ok = await confirm({
+      title: `Remove upstream "${u.name}"?`,
+      body: (
+        <>
+          <p>The upstream will be removed from <code>aeolus.yaml</code> and the daemon will stop talking to it.</p>
+          <p>Any allow / deny rules naming this upstream will also be cleared.</p>
+          {memberOf.length > 0 && (
+            <p>
+              It will also be unlinked from{' '}
+              {memberOf.length === 1 ? 'workspace' : 'workspaces'}{' '}
+              {memberOf.map((n, i) => (
+                <span key={n}>
+                  <code>{n}</code>
+                  {i < memberOf.length - 1 ? ', ' : ''}
+                </span>
+              ))}
+              .
+            </p>
+          )}
+        </>
+      ),
+      confirmLabel: 'Remove',
+      tone: 'danger',
+    })
+    if (!ok) return
     setRemoving(u.name)
     setError(null)
     try {
@@ -167,10 +199,18 @@ export default function Settings() {
       const filteredDeny = (config.tools?.deny ?? []).filter(
         (r) => r !== `${u.name}.*` && !r.startsWith(prefix)
       )
+      // Strip the upstream's name from every workspace's include
+      // list, or the backend rejects the PUT with
+      // "workspace X includes upstream Y which is not defined".
+      const filteredWorkspaces = (config.workspaces ?? []).map((w) => ({
+        ...w,
+        include: (w.include ?? []).filter((n) => n !== u.name),
+      }))
       const next: AeolusConfig = {
         ...config,
         upstreams: config.upstreams.filter((x) => x.name !== u.name),
         tools: { allow: filteredAllow, deny: filteredDeny },
+        workspaces: filteredWorkspaces,
       }
       const r = await fetch('/api/config', {
         method: 'PUT',
@@ -259,7 +299,11 @@ export default function Settings() {
     }
   }
 
-  async function createWorkspace(name: string, cwdMatch: string[]): Promise<boolean> {
+  async function createWorkspace(
+    name: string,
+    cwdMatch: string[],
+    clientMatch: string[],
+  ): Promise<boolean> {
     if (!config) return false
     const workspaces = config.workspaces ?? []
     if (workspaces.some((p) => p.name === name)) {
@@ -268,7 +312,15 @@ export default function Settings() {
     }
     const next: AeolusConfig = {
       ...config,
-      workspaces: [...workspaces, { name, include: [], cwd_match: cwdMatch }],
+      workspaces: [
+        ...workspaces,
+        {
+          name,
+          include: [],
+          cwd_match: cwdMatch,
+          client_match: clientMatch,
+        },
+      ],
     }
     const saved = await saveConfig(next)
     if (saved) {
@@ -281,7 +333,18 @@ export default function Settings() {
 
   async function deleteWorkspace(name: string) {
     if (!config) return
-    if (!confirm(`Delete workspace "${name}"? Upstreams stay; only the workspace entry is removed.`)) return
+    const ok = await confirm({
+      title: `Delete workspace "${name}"?`,
+      body: (
+        <>
+          <p>The workspace entry is removed from <code>aeolus.yaml</code>.</p>
+          <p>Upstreams that belonged to this workspace stay configured. They become globally visible again (if no other workspace scopes them).</p>
+        </>
+      ),
+      confirmLabel: 'Delete workspace',
+      tone: 'danger',
+    })
+    if (!ok) return
     const next: AeolusConfig = {
       ...config,
       workspaces: (config.workspaces ?? []).filter((p) => p.name !== name),
@@ -309,13 +372,14 @@ export default function Settings() {
     await saveConfig(next)
   }
 
-  // updateWorkspace lets the Edit Workspace modal change both the name and
-  // cwd_match in one save. Returns true on success so the modal can
-  // close itself.
+  // updateWorkspace lets the Edit Workspace modal change name +
+  // cwd_match + client_match in one save. Returns true on success so
+  // the modal can close itself.
   async function updateWorkspace(
     oldName: string,
     newName: string,
     cwdMatch: string[],
+    clientMatch: string[],
   ): Promise<boolean> {
     if (!config) return false
     const trimmed = newName.trim()
@@ -330,7 +394,9 @@ export default function Settings() {
     const next: AeolusConfig = {
       ...config,
       workspaces: (config.workspaces ?? []).map((p) =>
-        p.name === oldName ? { ...p, name: trimmed, cwd_match: cwdMatch } : p,
+        p.name === oldName
+          ? { ...p, name: trimmed, cwd_match: cwdMatch, client_match: clientMatch }
+          : p,
       ),
     }
     const saved = await saveConfig(next)
@@ -394,7 +460,9 @@ export default function Settings() {
         onSelect={setCurrentWorkspace}
         onNew={() => setShowNewWorkspace(true)}
         onDelete={(name) => deleteWorkspace(name)}
-        onUpdateWorkspace={(oldName, newName, cwd) => updateWorkspace(oldName, newName, cwd)}
+        onUpdateWorkspace={(oldName, newName, cwd, client) =>
+          updateWorkspace(oldName, newName, cwd, client)
+        }
         onShowSnippet={() => {
           // Pick the right snippet modal based on the current view.
           if (activeWorkspace) setShowSnippet(true)
@@ -417,6 +485,8 @@ export default function Settings() {
       )}
 
       <TourController />
+
+      {confirmDialog}
 
       <nav className="subtabs">
         <button
@@ -601,7 +671,9 @@ export default function Settings() {
         <NewWorkspaceModal
           existing={workspaces.map((p) => p.name)}
           onClose={() => setShowNewWorkspace(false)}
-          onCreate={(name, cwdMatch) => createWorkspace(name, cwdMatch)}
+          onCreate={(name, cwdMatch, clientMatch) =>
+            createWorkspace(name, cwdMatch, clientMatch)
+          }
         />
       )}
 
@@ -787,7 +859,7 @@ function UpstreamCard({
         {tab === 'setup' && (
           <>
             {failure && (
-              <FailureBlock raw={failure} onEdit={onEdit} />
+              <FailureBlock raw={failure} upstreamName={upstream.name} onEdit={onEdit} />
             )}
             {transport === 'stdio' ? (
               <>
@@ -1025,18 +1097,47 @@ function RuleList({ label, rules, tone }: { label: string; rules: string[]; tone
 // "Show details" expander for when the mapping doesn't help.
 function FailureBlock({
   raw,
+  upstreamName,
   onEdit,
 }: {
   raw: string
+  upstreamName: string
   onEdit: () => void
 }) {
   const friendly = friendlyUpstreamError(raw)
+  const [stderr, setStderr] = useState<string[]>([])
+
+  // Fetch the upstream's recent stderr when this block mounts (i.e.,
+  // when the user opens the Setup tab on a broken card). Stderr is
+  // often the actual reason behind "process exited" — env var
+  // missing, runtime panic, etc.
+  useEffect(() => {
+    let cancelled = false
+    fetch(`/api/upstreams/${encodeURIComponent(upstreamName)}/stderr`)
+      .then((r) => (r.ok ? r.json() : { lines: [] }))
+      .then((d: { lines?: string[] }) => {
+        if (!cancelled) setStderr(d.lines ?? [])
+      })
+      .catch(() => {
+        /* ignore */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [upstreamName, raw])
+
   return (
     <div className="card-failure">
       <div className="card-failure-label">Last error</div>
       <div className="card-failure-msg">{friendly.title}</div>
       {friendly.hint && (
         <div className="card-failure-hint">{friendly.hint}</div>
+      )}
+      {stderr.length > 0 && (
+        <details className="card-failure-details" open>
+          <summary>Recent server stderr ({stderr.length} lines)</summary>
+          <pre className="card-failure-stderr">{stderr.join('\n')}</pre>
+        </details>
       )}
       <div className="card-failure-actions">
         <button className="card-failure-edit" onClick={onEdit}>
@@ -1167,7 +1268,12 @@ function WorkspaceBar(props: {
   onSelect: (name: string) => void
   onNew: () => void
   onDelete: (name: string) => void
-  onUpdateWorkspace: (oldName: string, newName: string, cwd: string[]) => Promise<boolean>
+  onUpdateWorkspace: (
+    oldName: string,
+    newName: string,
+    cwd: string[],
+    client: string[],
+  ) => Promise<boolean>
   onShowSnippet: () => void
 }) {
   const [editing, setEditing] = useState(false)
@@ -1183,6 +1289,13 @@ function WorkspaceBar(props: {
         onNew={props.onNew}
       />
 
+      {activeWorkspace && (
+        <AutoDetectChip
+          workspace={activeWorkspace}
+          onEdit={() => setEditingAutoDetect(true)}
+        />
+      )}
+
       <button
         className="btn-secondary"
         onClick={props.onShowSnippet}
@@ -1197,19 +1310,13 @@ function WorkspaceBar(props: {
       </button>
 
       {activeWorkspace && (
-        <>
-          <AutoDetectChip
-            workspace={activeWorkspace}
-            onEdit={() => setEditingAutoDetect(true)}
-          />
-          <button
-            className="btn-secondary"
-            onClick={() => setEditing(true)}
-            title="Rename or delete this workspace"
-          >
-            Edit workspace
-          </button>
-        </>
+        <button
+          className="btn-secondary"
+          onClick={() => setEditing(true)}
+          title="Rename or delete this workspace"
+        >
+          Edit workspace
+        </button>
       )}
 
       {editing && activeWorkspace && (
@@ -1219,7 +1326,13 @@ function WorkspaceBar(props: {
           onClose={() => setEditing(false)}
           onSave={async (newName) => {
             const cwd = activeWorkspace.cwd_match ?? []
-            const ok = await props.onUpdateWorkspace(activeWorkspace.name, newName, cwd)
+            const client = activeWorkspace.client_match ?? []
+            const ok = await props.onUpdateWorkspace(
+              activeWorkspace.name,
+              newName,
+              cwd,
+              client,
+            )
             if (ok) setEditing(false)
           }}
           onDelete={() => {
@@ -1233,8 +1346,13 @@ function WorkspaceBar(props: {
         <AutoDetectModal
           workspace={activeWorkspace}
           onClose={() => setEditingAutoDetect(false)}
-          onSave={async (cwd) => {
-            const ok = await props.onUpdateWorkspace(activeWorkspace.name, activeWorkspace.name, cwd)
+          onSave={async (cwd, client) => {
+            const ok = await props.onUpdateWorkspace(
+              activeWorkspace.name,
+              activeWorkspace.name,
+              cwd,
+              client,
+            )
             if (ok) setEditingAutoDetect(false)
           }}
         />
@@ -1271,31 +1389,40 @@ function WorkspaceSelect(props: {
 }
 
 function AutoDetectChip(props: { workspace: Workspace; onEdit: () => void }) {
-  const patterns = props.workspace.cwd_match ?? []
-  if (patterns.length === 0) {
+  const cwd = props.workspace.cwd_match ?? []
+  const client = props.workspace.client_match ?? []
+  if (cwd.length === 0 && client.length === 0) {
     return (
       <button
         type="button"
         className="auto-detect-chip auto-detect-chip-empty"
         onClick={props.onEdit}
-        title="Set folder patterns so this workspace applies automatically by cwd — no per-project config edits needed."
+        title="Set folder or client patterns so this workspace applies automatically — no per-project config edits needed."
       >
-        + Set auto-detect path
+        + Set auto-detect rules
       </button>
     )
   }
-  const first = patterns[0]
-  const rest = patterns.length - 1
+  // Prefer showing the cwd rule (the most specific signal) when set.
+  // Fall back to the client rule when only that's defined.
+  const primary = cwd[0] ?? client[0]
+  const totalRest = cwd.length + client.length - 1
+  const title = [
+    cwd.length > 0 ? `Folders:\n  ${cwd.join('\n  ')}` : '',
+    client.length > 0 ? `Clients:\n  ${client.join('\n  ')}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
   return (
     <button
       type="button"
       className="auto-detect-chip"
       onClick={props.onEdit}
-      title={`Workspace applies automatically when running in:\n${patterns.join('\n')}`}
+      title={`Workspace applies automatically when:\n\n${title}`}
     >
       <span className="auto-detect-icon">↳</span>
-      <span className="mono">{first}</span>
-      {rest > 0 && <span className="muted">+{rest} more</span>}
+      <span className="mono">{primary}</span>
+      {totalRest > 0 && <span className="muted">+{totalRest} more</span>}
     </button>
   )
 }
@@ -1498,10 +1625,15 @@ function CwdExamples() {
 function NewWorkspaceModal(props: {
   existing: string[]
   onClose: () => void
-  onCreate: (name: string, cwdMatch: string[]) => Promise<boolean>
+  onCreate: (
+    name: string,
+    cwdMatch: string[],
+    clientMatch: string[],
+  ) => Promise<boolean>
 }) {
   const [name, setName] = useState('')
   const [cwd, setCwd] = useState('')
+  const [client, setClient] = useState('')
   const [saving, setSaving] = useState(false)
   const trimmed = name.trim()
   const conflict = props.existing.includes(trimmed)
@@ -1511,7 +1643,11 @@ function NewWorkspaceModal(props: {
     if (!valid || saving) return
     setSaving(true)
     try {
-      await props.onCreate(trimmed, cwd.trim() ? [cwd.trim()] : [])
+      await props.onCreate(
+        trimmed,
+        cwd.trim() ? [cwd.trim()] : [],
+        client.trim() ? [client.trim()] : [],
+      )
     } finally {
       setSaving(false)
     }
@@ -1556,6 +1692,21 @@ function NewWorkspaceModal(props: {
               disabled={saving}
             />
             <CwdExamples />
+          </label>
+          <label className="field">
+            <span className="field-label">Auto-detect by client (optional)</span>
+            <input
+              className="text-input"
+              value={client}
+              onChange={(e) => setClient(e.target.value)}
+              placeholder="claude, cursor, vscode, zed…"
+              disabled={saving}
+            />
+            <span className="field-hint">
+              Case-insensitive substring of the MCP client's identity
+              (e.g. <code>claude</code> matches "Claude Code 1.2"). Combines
+              with the folder rule via AND when both are set.
+            </span>
           </label>
         </div>
         <footer className="modal-footer">
@@ -1666,9 +1817,12 @@ function EditWorkspaceModal(props: {
 function AutoDetectModal(props: {
   workspace: Workspace
   onClose: () => void
-  onSave: (cwd: string[]) => Promise<void> | void
+  onSave: (cwd: string[], client: string[]) => Promise<void> | void
 }) {
   const [cwd, setCwd] = useState((props.workspace.cwd_match ?? []).join('\n'))
+  const [client, setClient] = useState(
+    (props.workspace.client_match ?? []).join('\n'),
+  )
   const [saving, setSaving] = useState(false)
 
   async function submit() {
@@ -1677,6 +1831,10 @@ function AutoDetectModal(props: {
     try {
       await props.onSave(
         cwd
+          .split('\n')
+          .map((s) => s.trim())
+          .filter(Boolean),
+        client
           .split('\n')
           .map((s) => s.trim())
           .filter(Boolean),
@@ -1701,7 +1859,7 @@ function AutoDetectModal(props: {
             <span className="field-label">Project folders</span>
             <textarea
               className="text-input"
-              rows={4}
+              rows={3}
               value={cwd}
               onChange={(e) => setCwd(e.target.value)}
               placeholder={'~/code/acme-backend/**\n~/work/acme/**'}
@@ -1709,6 +1867,23 @@ function AutoDetectModal(props: {
               disabled={saving}
             />
             <CwdExamples />
+          </label>
+          <label className="field">
+            <span className="field-label">Clients</span>
+            <textarea
+              className="text-input"
+              rows={3}
+              value={client}
+              onChange={(e) => setClient(e.target.value)}
+              placeholder={'claude\ncursor'}
+              disabled={saving}
+            />
+            <span className="field-hint">
+              Case-insensitive substring of the MCP client identity
+              (e.g. <code>claude</code> matches "Claude Code 1.2"). One per
+              line — a connection matches if <em>any</em> line hits. When set
+              alongside project folders, <em>both</em> must match (AND).
+            </span>
           </label>
         </div>
         <footer className="modal-footer">
@@ -1932,8 +2107,9 @@ function ClientConfigModal(props: {
   const active = clientChoices.find((c) => c.id === choice)!
   const workspaceName = props.workspace?.name ?? null
   const snippet = active.sample(workspaceName)
-  const patterns = props.workspace?.cwd_match ?? []
-  const hasAutoDetect = patterns.length > 0
+  const cwdPatterns = props.workspace?.cwd_match ?? []
+  const clientPatterns = props.workspace?.client_match ?? []
+  const hasAutoDetect = cwdPatterns.length + clientPatterns.length > 0
   const isGlobal = props.workspace === null
 
   async function copy() {
@@ -1967,15 +2143,32 @@ function ClientConfigModal(props: {
           ) : hasAutoDetect ? (
             <div className="callout callout-success">
               <strong>Auto-detect is on for this workspace.</strong>{' '}
-              <span>
-                It applies automatically whenever an MCP client launches from
-                inside:
-              </span>
-              <ul className="callout-list">
-                {patterns.map((p) => (
-                  <li key={p}><code className="mono">{p}</code></li>
-                ))}
-              </ul>
+              <span>It applies automatically when:</span>
+              {cwdPatterns.length > 0 && (
+                <>
+                  <div className="callout-sub">
+                    the client launches from inside one of these folders
+                  </div>
+                  <ul className="callout-list">
+                    {cwdPatterns.map((p) => (
+                      <li key={p}><code className="mono">{p}</code></li>
+                    ))}
+                  </ul>
+                </>
+              )}
+              {clientPatterns.length > 0 && (
+                <>
+                  <div className="callout-sub">
+                    {cwdPatterns.length > 0 ? 'AND ' : ''}the client identity
+                    contains one of these substrings
+                  </div>
+                  <ul className="callout-list">
+                    {clientPatterns.map((p) => (
+                      <li key={p}><code className="mono">{p}</code></li>
+                    ))}
+                  </ul>
+                </>
+              )}
               <span>
                 If your global Claude / Cursor / Zed config already has{' '}
                 <code className="mono">aeolus mcp</code> (without{' '}
@@ -1986,10 +2179,11 @@ function ClientConfigModal(props: {
             </div>
           ) : (
             <div className="callout">
-              <strong>Tip:</strong> set <em>Auto-detect by project folder</em>{' '}
-              on this workspace and Aeolus will pick it automatically based on
-              where the client launches from — no per-project config edits
-              needed. <em>Edit workspace</em> → "Auto-detect by project folder".
+              <strong>Tip:</strong> set auto-detect rules on this workspace and
+              Aeolus will pick it automatically based on the launch folder or
+              the MCP client's identity — no per-project config edits needed.
+              Click the <em>+ Set auto-detect rules</em> chip next to the
+              workspace selector.
             </div>
           )}
 

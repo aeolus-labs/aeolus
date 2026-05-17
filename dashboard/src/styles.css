@@ -2378,6 +2378,11 @@ body {
   margin: 2px 0;
 }
 
+.callout-sub {
+  margin-top: 6px;
+  font-weight: 500;
+}
+
 .settings-section-actions {
   display: flex;
   gap: 8px;
@@ -2536,6 +2541,64 @@ body {
   color: var(--text);
   word-break: break-all;
   white-space: pre-wrap;
+}
+
+.card-failure-stderr {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+/* Description tab in the AddUpstream modal. */
+
+.description-blurb {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.description-links {
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+
+.description-links a {
+  color: var(--accent);
+}
+
+.description-yaml {
+  margin: 0 0 8px;
+  padding: 12px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text);
+  overflow-x: auto;
+  white-space: pre;
+}
+
+/* Confirm dialog body — paragraphs already have margins from the
+   default but keep them tight inside the dialog. */
+.confirm-body p {
+  margin: 0 0 8px;
+  line-height: 1.5;
+}
+
+.confirm-body p:last-child {
+  margin-bottom: 0;
 }
 
 /* Scope pill — single "scoped" indicator on the server card when an

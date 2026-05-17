@@ -10,22 +10,23 @@ import (
 // (in order):
 //
 //  1. explicit name (from the bridge's --workspace flag)
-//  2. CWDMatch patterns against the supplied cwd
+//  2. auto-match: walk workspaces and pick the best match across
+//     CWDMatch + ClientMatch. A workspace matches when every signal
+//     it defines matches the supplied value (AND across cwd & client).
+//     Workspaces with no auto-match signals at all never auto-match.
 //  3. a workspace literally named "default" if defined
 //
 // Returns the empty string when nothing matches — callers treat that
 // as "no workspace selected, expose only unscoped upstreams".
-func (c *Config) ResolveWorkspace(explicit, cwd string) string {
+func (c *Config) ResolveWorkspace(explicit, cwd, client string) string {
 	if explicit != "" {
 		if w := c.WorkspaceByName(explicit); w != nil {
 			return w.Name
 		}
 		// Explicit workspace that doesn't exist falls through to defaulting.
 	}
-	if cwd != "" {
-		if w := c.workspaceForCWD(cwd); w != nil {
-			return w.Name
-		}
+	if w := c.autoMatchWorkspace(cwd, client); w != nil {
+		return w.Name
 	}
 	if w := c.WorkspaceByName("default"); w != nil {
 		return w.Name
@@ -33,29 +34,90 @@ func (c *Config) ResolveWorkspace(explicit, cwd string) string {
 	return ""
 }
 
-// workspaceForCWD scans workspaces and returns the first whose
-// CWDMatch patterns match cwd. Patterns support:
-//   - exact path
-//   - "~" expansion to $HOME
-//   - trailing "/**" meaning "this directory or any descendant"
+// autoMatchWorkspace finds the best-scoring workspace that satisfies
+// every signal it defines. A workspace with CWDMatch alone is matched
+// by cwd; with ClientMatch alone, by client; with both, by both (AND).
+// A workspace with neither never auto-matches.
 //
-// Match longest-prefix-wins so a more specific project workspace
-// outranks a broader parent one when both match.
-func (c *Config) workspaceForCWD(cwd string) *Workspace {
-	clean := filepath.Clean(cwd)
+// Scoring rewards specificity:
+//   - CWDMatch contributes the matched prefix length.
+//   - ClientMatch contributes a small constant bump so a client-only
+//     workspace can still win against an empty workspace, but a more
+//     specific path beats a generic "any Cursor session" rule.
+func (c *Config) autoMatchWorkspace(cwd, client string) *Workspace {
+	clean := ""
+	if cwd != "" {
+		clean = filepath.Clean(cwd)
+	}
 	var best *Workspace
 	bestScore := -1
 	for i := range c.Workspaces {
 		w := &c.Workspaces[i]
-		for _, pattern := range w.CWDMatch {
-			score := matchCWD(expandHome(pattern), clean)
-			if score > bestScore {
-				bestScore = score
-				best = w
+		if len(w.CWDMatch) == 0 && len(w.ClientMatch) == 0 {
+			continue
+		}
+
+		cwdScore := -1
+		if len(w.CWDMatch) > 0 {
+			if clean == "" {
+				continue // workspace needs a cwd, caller gave us none
 			}
+			cwdScore = bestCWDScore(w.CWDMatch, clean)
+			if cwdScore < 0 {
+				continue
+			}
+		}
+
+		clientScore := -1
+		if len(w.ClientMatch) > 0 {
+			if client == "" {
+				continue
+			}
+			if !anyClientMatch(w.ClientMatch, client) {
+				continue
+			}
+			clientScore = 1
+		}
+
+		score := 0
+		if cwdScore >= 0 {
+			score += cwdScore
+		}
+		if clientScore > 0 {
+			// Small bonus so client-only matches beat zero, but a
+			// long cwd prefix still wins over a generic client match.
+			score += 1
+		}
+		if score > bestScore {
+			bestScore = score
+			best = w
 		}
 	}
 	return best
+}
+
+func bestCWDScore(patterns []string, cwd string) int {
+	best := -1
+	for _, pat := range patterns {
+		if s := matchCWD(expandHome(pat), cwd); s > best {
+			best = s
+		}
+	}
+	return best
+}
+
+func anyClientMatch(patterns []string, client string) bool {
+	cl := strings.ToLower(client)
+	for _, p := range patterns {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p == "" {
+			continue
+		}
+		if strings.Contains(cl, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // matchCWD returns a match score (length of matched prefix) or -1 if

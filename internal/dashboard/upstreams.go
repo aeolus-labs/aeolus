@@ -39,6 +39,8 @@ func (s *Server) handleUpstream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleUpstreamReconnect(w, r, name)
+	case "stderr":
+		s.handleUpstreamStderr(w, r, name)
 	default:
 		http.NotFound(w, r)
 	}

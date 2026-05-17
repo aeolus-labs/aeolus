@@ -63,11 +63,18 @@ func (s *Server) handleMCPPost(w http.ResponseWriter, r *http.Request) {
 		}
 		sessID = newSessionID()
 		s.openSession(sessID)
-		// Resolve workspace from the bridge's request headers. Explicit
-		// X-Aeolus-Workspace wins; otherwise we match X-Aeolus-Cwd
-		// against configured workspace cwd_match patterns; otherwise we
-		// fall back to a workspace literally named "default", and
-		// finally to "global" (unscoped) view.
+		// Resolve workspace from the bridge's request headers + the
+		// client identity carried in the initialize payload. Explicit
+		// X-Aeolus-Workspace wins; otherwise the cwd + client identity
+		// are matched against configured workspace cwd_match /
+		// client_match rules; otherwise we fall back to a workspace
+		// literally named "default", and finally to "global" view.
+		var initParams mcp.InitializeParams
+		if msg.Method == mcp.MethodInitialize && len(msg.Params) > 0 {
+			_ = json.Unmarshal(msg.Params, &initParams)
+		}
+		clientName := formatHTTPClientName(initParams.ClientInfo)
+
 		s.cfgMu.RLock()
 		cfg := s.cfg
 		s.cfgMu.RUnlock()
@@ -76,6 +83,7 @@ func (s *Server) handleMCPPost(w http.ResponseWriter, r *http.Request) {
 			workspace = cfg.ResolveWorkspace(
 				strings.TrimSpace(r.Header.Get("X-Aeolus-Workspace")),
 				strings.TrimSpace(r.Header.Get("X-Aeolus-Cwd")),
+				clientName,
 			)
 		}
 		s.setSessionWorkspace(sessID, workspace)

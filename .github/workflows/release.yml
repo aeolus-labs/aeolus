@@ -35,3 +35,9 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Forwarded to goreleaser so the homebrew_casks step can push
+          # the generated cask to aeolus-labs/homebrew-tap. The secret
+          # must exist on the repo (Settings → Secrets and variables →
+          # Actions). GITHUB_TOKEN can't reach the tap repo on its own —
+          # it's scoped to this repo only.
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
